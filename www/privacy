@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Billfold — Privacy Policy</title>
+<meta name="theme-color" content="#F5F6F2">
+<style>
+  :root{ --paper:#F5F6F2; --ink:#1B2A32; --sub:#63727A; --pine:#1F6F54; --line:#E3E7E0; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--paper); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.6; }
+  .wrap{ max-width:640px; margin:0 auto; padding:2.5rem 1.5rem 4rem; }
+  h1{ font-size:1.6rem; margin-bottom:.25rem; }
+  .updated{ color:var(--sub); font-size:.85rem; margin-bottom:2rem; }
+  h2{ font-size:1.05rem; margin-top:2rem; margin-bottom:.5rem; color:var(--pine); }
+  p, li{ font-size:.95rem; }
+  ul{ padding-left:1.25rem; }
+  a{ color:var(--pine); }
+  .card{ background:#fff; border:1px solid var(--line); border-radius:.75rem; padding:1.25rem 1.5rem; margin-top:1.5rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Billfold — Privacy Policy</h1>
+  <p class="updated">Last updated: July 2026</p>
+
+  <div class="card">
+    <p><strong>The short version:</strong> Billfold does not collect, transmit, sell, or share any of your personal or financial data. Everything you enter — bills, spending, savings, notes — is stored only on your own device, and never leaves it unless you personally choose to create a backup file and send it somewhere yourself.</p>
+  </div>
+
+  <h2>What Billfold stores, and where</h2>
+  <p>Billfold saves your data using your device's local on-device storage. There is no account to create, no sign-in, and no remote server that Billfold talks to as part of normal use. Nothing you type into Billfold is sent to us, to Google, or to any third party by the app itself.</p>
+
+  <h2>Backups</h2>
+  <p>If you use the Back Up feature, Billfold creates a file containing your data and hands it to your device's own save/share screen. Where that file ends up — a folder on your phone, Google Drive, OneDrive, email, or anywhere else — is entirely your choice, made through your device's own system tools. Billfold does not upload this file anywhere on its own, and does not have access to wherever you choose to store it.</p>
+
+  <h2>Notifications</h2>
+  <p>Bill reminders are scheduled and delivered entirely on your device, using your device's own notification system. No reminder data is sent off your device to make this work.</p>
+
+  <h2>Advertising and analytics</h2>
+  <p>Billfold contains no ads, no ad networks, no analytics SDKs, and no crash- or usage-tracking libraries. We have no way of knowing how you use the app, and we don't try to.</p>
+
+  <h2>Permissions</h2>
+  <p>The Android app may request permission to schedule notifications and, on newer Android versions, to schedule them at a precise time (used only for bill-due reminders you configure yourself), and permission to write a file to your device's storage when you use the Back Up feature. Neither permission is used to access, read, or transmit any other data on your device.</p>
+
+  <h2>Children's privacy</h2>
+  <p>Billfold is a general-purpose personal finance tool, not directed at children, and does not knowingly collect information from anyone, of any age, since it does not collect information at all.</p>
+
+  <h2>Changes to this policy</h2>
+  <p>If Billfold's data practices ever change — for example, if a future version adds an optional feature that requires network access — this page will be updated first, with a new "last updated" date above.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy or the app can be sent to <a href="mailto:jonathanroot84@gmail.com">jonathanroot84@gmail.com</a>.</p>
+</div>
+</body>
+</html>
