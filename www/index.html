@@ -19,7 +19,14 @@
   :root{
     --paper:#F5F6F2; --card:#FFFFFF; --ink:#1B2A32; --sub:#63727A; --line:#E3E7E0;
     --pine:#1F6F54; --pine-soft:#E4F0E9; --amber:#A8611C; --amber-soft:#F8ECDC;
-    --red:#A63D2F; --red-soft:#FBEDEA; --field:#FBFCFA;
+    --red:#A63D2F; --red-soft:#FBEDEA; --field:#FBFCFA; --track:#C6CEC6;
+    --chip:#1B2A32; --chip-fg:#FFFFFF;
+  }
+  :root[data-theme="dark"]{
+    --paper:#14181A; --card:#1E2426; --ink:#ECF0EE; --sub:#8B9A96; --line:#2C3538;
+    --pine:#4CAF8C; --pine-soft:#1B3A2E; --amber:#E2A253; --amber-soft:#3A2A15;
+    --red:#E2776A; --red-soft:#3A211D; --field:#191F21; --track:#3A4448;
+    --chip:#1B3A2E; --chip-fg:#4CAF8C;
   }
   *{ box-sizing:border-box; margin:0; }
   html,body{ height:100%; }
@@ -27,6 +34,7 @@
     background:var(--paper); color:var(--ink);
     font-family:'Schibsted Grotesk', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     font-size:16px; -webkit-font-smoothing:antialiased;
+    transition:background-color .15s ease, color .15s ease;
   }
   button{ font-family:inherit; font-size:inherit; color:inherit; background:none; border:none; cursor:pointer; }
   input,select,textarea{ font-family:inherit; font-size:0.9rem; color:var(--ink); }
@@ -52,7 +60,7 @@
 
   nav.desktop{ display:none; gap:.25rem; }
   nav.desktop button{ padding:.35rem 1rem; border-radius:999px; font-size:.875rem; font-weight:500; color:var(--sub); }
-  nav.desktop button.on{ background:var(--ink); color:#fff; }
+  nav.desktop button.on{ background:var(--chip); color:var(--chip-fg); }
 
   nav.tabbar{
     position:fixed; bottom:0; left:0; right:0; z-index:20; background:var(--card);
@@ -88,13 +96,14 @@
   .calcbtn:active{ background:var(--line); }
 
   @media (min-width:768px){
-    nav.desktop{ display:flex; }
+    nav.desktop{ display:flex; flex:1; justify-content:center; }
     nav.tabbar{ display:none; }
     main{ padding-bottom:3rem; }
   }
 
   /* components */
-  .card{ background:var(--card); border:1px solid var(--line); border-radius:1rem; margin-bottom:1rem; }
+  .card{ background:var(--card); border:1px solid var(--line); border-radius:1rem; margin-bottom:1rem;
+    transition:background-color .15s ease, border-color .15s ease; }
   .pad{ padding:1rem; }
   .eyebrow{ font-size:.7rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--sub); margin-bottom:.75rem; }
   .row{ display:flex; align-items:center; justify-content:space-between; gap:.75rem; }
@@ -142,7 +151,7 @@
   .bill-li{ display:flex; align-items:center; gap:.75rem; padding:.75rem 1rem; }
   .bill-li + .bill-li, li + li > .bill-li, ul.plain li + li{ border-top:1px solid var(--line); }
   ul.plain{ list-style:none; padding:0; }
-  .checkbtn{ flex:none; width:26px; height:26px; border-radius:999px; border:2px solid #C6CEC6;
+  .checkbtn{ flex:none; width:26px; height:26px; border-radius:999px; border:2px solid var(--track);
     display:flex; align-items:center; justify-content:center; color:#fff; transition:background .15s,border-color .15s; }
   .checkbtn.paid{ background:var(--pine); border-color:var(--pine); }
   .bill-main{ flex:1; display:flex; align-items:center; justify-content:space-between; text-align:left; padding:0; }
@@ -162,7 +171,7 @@
   .seg{ display:flex; flex-wrap:wrap; justify-content:center; border:1px solid var(--line); background:var(--card); border-radius:999px;
     padding:.25rem; width:fit-content; max-width:100%; margin:0 auto 1rem; }
   .seg button{ padding:.35rem 1rem; border-radius:999px; font-size:.875rem; font-weight:600; color:var(--sub); }
-  .seg button.on{ background:var(--ink); color:#fff; }
+  .seg button.on{ background:var(--chip); color:var(--chip-fg); }
 
   /* donut */
   .donut-wrap{ position:relative; width:210px; height:210px; margin:0 auto .75rem; }
@@ -192,9 +201,9 @@
   .month-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:.5rem; }
   .month-grid button{ padding:.65rem 0; border-radius:.75rem; border:1px solid var(--line);
     font-weight:600; font-size:.875rem; }
-  .month-grid button.on{ background:var(--ink); color:#fff; border-color:var(--ink); }
+  .month-grid button.on{ background:var(--chip); color:var(--chip-fg); border-color:var(--chip); }
 
-  .toggle{ width:40px; height:22px; border-radius:999px; background:#C6CEC6; padding:2px;
+  .toggle{ width:40px; height:22px; border-radius:999px; background:var(--track); padding:2px;
     display:flex; align-items:center; justify-content:flex-start; transition:background .15s; flex:none; }
   .toggle.on{ background:var(--pine); justify-content:flex-end; }
   .toggle .knob{ width:18px; height:18px; border-radius:999px; background:#fff; }
@@ -227,7 +236,6 @@
   <div class="top-inner">
     <div class="wordmark"><span class="dot"></span><span class="name">Billfold</span></div>
     <nav class="desktop" id="desktopNav"></nav>
-    <button id="hdrAdd" class="btn btn-pine hidden" style="padding:.4rem .85rem;border-radius:999px">+ Add bill</button>
   </div>
   <div id="banner"></div>
 </header>
@@ -274,7 +282,8 @@ function icon(name, size){
     toolbox: '<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M2 13h20"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>',
     lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
     help: '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 1 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
-    info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>'
+    info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    theme: '<circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20z" fill="currentColor" stroke="none"/>'
   };
   return '<svg viewBox="0 0 24 24" width="'+s+'" height="'+s+'" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+paths[name]+'</svg>';
 }
@@ -434,23 +443,6 @@ function render(){
   else if(view.screen==="track") el.innerHTML = trackScreen();
   else if(view.screen==="reports") el.innerHTML = reportsScreen();
   else el.innerHTML = dataScreen();
-
-  var hdrAdd = document.getElementById("hdrAdd");
-  var showAdd = (view.screen==="bills") || (view.screen==="track");
-  hdrAdd.className = "btn btn-pine" + (showAdd ? "" : " hidden");
-  hdrAdd.style.cssText = "padding:.4rem .85rem;border-radius:999px;" + (showAdd ? "" : "display:none;");
-  if(view.screen==="bills"){
-    if(billsSubMode==="funds"){
-      hdrAdd.textContent = "+ Add fund";
-      hdrAdd.onclick = function(){ openFundForm(null); };
-    } else {
-      hdrAdd.textContent = "+ Add bill";
-      hdrAdd.onclick = function(){ openBillForm(null); };
-    }
-  } else if(view.screen==="track"){
-    if(trackMode==="savings"){ hdrAdd.textContent = "+ Add savings"; hdrAdd.onclick = function(){ openSavingsEntryForm(null); }; }
-    else { hdrAdd.textContent = "+ Add entry"; hdrAdd.onclick = function(){ openJournalForm(null); }; }
-  }
 }
 function renderNav(){
   var tabs = [["month","Month","calendar"],["bills","Bills","list"],["track","Tracking","journal"],["reports","Tools","toolbox"],["data","Settings","db"]];
@@ -540,11 +532,15 @@ function moneyRow(label, value, handler){
 /* ---------- Bills screen ---------- */
 function setBillsSubMode(m){ billsSubMode = m; render(); }
 function billsScreen(){
-  var seg = '<div class="seg">'
+  var seg = '<div class="seg" style="margin:0">'
     + '<button class="'+(billsSubMode==="bills"?"on":"")+'" onclick="setBillsSubMode(\'bills\')">Bills</button>'
     + '<button class="'+(billsSubMode==="funds"?"on":"")+'" onclick="setBillsSubMode(\'funds\')">Funds</button>'
     + '</div>';
-  return seg + (billsSubMode==="funds" ? fundsSection() : billsSection());
+  var addBtn = billsSubMode==="funds"
+    ? '<button class="btn btn-pine" style="padding:.4rem .85rem;border-radius:999px;flex:none" onclick="openFundForm(null)">+ Add fund</button>'
+    : '<button class="btn btn-pine" style="padding:.4rem .85rem;border-radius:999px;flex:none" onclick="openBillForm(null)">+ Add bill</button>';
+  var row = '<div class="row" style="margin-bottom:1rem">' + seg + addBtn + '</div>';
+  return row + (billsSubMode==="funds" ? fundsSection() : billsSection());
 }
 function billsSection(){
   var active = S.bills.filter(function(b){return b.active;});
@@ -1181,11 +1177,15 @@ function investScreen(){
 /* ---------- Tracking tab: spending journal + savings goal ---------- */
 function setTrackMode(m){ trackMode = m; render(); }
 function trackScreen(){
-  var seg = '<div class="seg">'
+  var seg = '<div class="seg" style="margin:0">'
     + '<button class="'+(trackMode==="journal"?"on":"")+'" onclick="setTrackMode(\'journal\')">Spending</button>'
     + '<button class="'+(trackMode==="savings"?"on":"")+'" onclick="setTrackMode(\'savings\')">Savings</button>'
     + '</div>';
-  return seg + (trackMode==="savings" ? savingsScreen() : journalScreen());
+  var addBtn = trackMode==="savings"
+    ? '<button class="btn btn-pine" style="padding:.4rem .85rem;border-radius:999px;flex:none" onclick="openSavingsEntryForm(null)">+ Add savings</button>'
+    : '<button class="btn btn-pine" style="padding:.4rem .85rem;border-radius:999px;flex:none" onclick="openJournalForm(null)">+ Add entry</button>';
+  var row = '<div class="row" style="margin-bottom:1rem">' + seg + addBtn + '</div>';
+  return row + (trackMode==="savings" ? savingsScreen() : journalScreen());
 }
 function fmtDateLabel(iso){
   var d = new Date(iso+"T00:00:00");
@@ -1616,6 +1616,7 @@ var SETTINGS_SECTIONS = [
   ["backup", "Back up & restore", "Save a copy, move to a new phone", "down"],
   ["notes", "Card names & notes", "Rename cards, jot a note to yourself", "list"],
   ["reminders", "Reminders", "Get a heads-up before bills are due", "calendar"],
+  ["appearance", "Appearance", "Light, dark, or match your device", "theme"],
   ["lock", "App lock", "Require a PIN to open Billfold", "lock"],
   ["help", "Help", "How to use Billfold", "help"],
   ["about", "About Billfold", "Privacy, ownership, this device only", "info"],
@@ -1662,11 +1663,12 @@ function dataScreen(){
 }
 function settingsDetailScreen(key){
   if(key==="dev" && !devUnlocked){ settingsSubScreen = null; return settingsListScreen(); }
-  var titles = {backup:"Back up & restore", notes:"Card names & notes", reminders:"Reminders", lock:"App lock", help:"Help", about:"About Billfold", reset:"Start over", dev:"Developer options"};
+  var titles = {backup:"Back up & restore", notes:"Card names & notes", reminders:"Reminders", appearance:"Appearance", lock:"App lock", help:"Help", about:"About Billfold", reset:"Start over", dev:"Developer options"};
   var body;
   if(key==="backup") body = backupDetailCard();
   else if(key==="notes") body = notesDetailCard();
   else if(key==="reminders") body = remindersCard();
+  else if(key==="appearance") body = appearanceCard();
   else if(key==="lock") body = lockCard();
   else if(key==="help") body = helpDetailCard();
   else if(key==="about") body = aboutDetailCard();
@@ -2520,6 +2522,39 @@ function devDetailCard(){
 }
 
 /* --- Settings card: set / change / turn off the PIN --- */
+/* ---------- Appearance (light / dark / system) ---------- */
+var THEME_KEY = "billfold:theme";
+function loadThemeSetting(){
+  var v = localStorage.getItem(THEME_KEY);
+  return (v==="light" || v==="dark" || v==="system") ? v : "system";
+}
+function effectiveTheme(setting){
+  if(setting==="system"){
+    return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+  }
+  return setting;
+}
+function applyTheme(){
+  var eff = effectiveTheme(loadThemeSetting());
+  document.documentElement.setAttribute("data-theme", eff);
+  var mt = document.querySelector('meta[name="theme-color"]');
+  if(mt) mt.setAttribute("content", eff==="dark" ? "#14181A" : "#F5F6F2");
+}
+function setAppearance(v){
+  localStorage.setItem(THEME_KEY, v);
+  applyTheme();
+  render();
+}
+function appearanceCard(){
+  var setting = loadThemeSetting();
+  return '<p class="muted" style="font-size:.85rem;margin-bottom:.9rem">Choose how Billfold looks on this device.</p>'
+    + '<div class="seg" style="width:100%">'
+    + '<button style="flex:1" class="'+(setting==="light"?"on":"")+'" onclick="setAppearance(\'light\')">Light</button>'
+    + '<button style="flex:1" class="'+(setting==="dark"?"on":"")+'" onclick="setAppearance(\'dark\')">Dark</button>'
+    + '<button style="flex:1" class="'+(setting==="system"?"on":"")+'" onclick="setAppearance(\'system\')">System</button>'
+    + '</div>'
+    + '<p class="muted" style="font-size:.75rem;margin-top:.75rem">“System” follows your phone’s own light/dark setting, and switches automatically if that changes while Billfold is open.</p>';
+}
 function lockCard(){
   var set = lockIsSet();
   var body;
@@ -2634,6 +2669,12 @@ function bootApp(){
   initReminderActions();
   if(S.remindersOn) rescheduleReminders();
   maybeShowIntro();
+}
+applyTheme();
+if(window.matchMedia){
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function(){
+    if(loadThemeSetting()==="system") applyTheme();
+  });
 }
 document.addEventListener("keydown", calcKeydown);
 if(isWebOnly() && !inviteVerified()){
