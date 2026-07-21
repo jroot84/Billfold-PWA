@@ -1507,7 +1507,7 @@ function investScreen(){
 /* ---------- Log tab: spending journal + savings ledger ---------- */
 function setTrackMode(m){ trackMode = m; journalSearchOpen = false; savingsSearchOpen = false; render(); }
 function trackScreen(){
-  var seg = '<div class="seg">'
+  var seg = '<div class="seg" style="margin:0">'
     + '<button class="'+(trackMode==="journal"?"on":"")+'" onclick="setTrackMode(\'journal\')">Spending</button>'
     + '<button class="'+(trackMode==="savings"?"on":"")+'" onclick="setTrackMode(\'savings\')">Savings</button>'
     + '</div>';
@@ -1607,6 +1607,10 @@ function openTrackToolbarMenu(){
     + '<li><button class="bill-li" style="width:100%;text-align:left" onclick="closeModal();openJournalFilterSheet()">'
       + '<span class="settings-icon">'+icon("filter",18)+'</span>'
       + '<span style="flex:1"><div class="bill-name">Filter</div><div class="bill-cat">'+esc(journalFilterSummary())+'</div></span>'
+      + '</button></li>'
+    + '<li><button class="bill-li" style="width:100%;text-align:left" onclick="closeModal();exportJournalCsv()">'
+      + '<span class="settings-icon">'+icon("down",18)+'</span>'
+      + '<span style="flex:1"><div class="bill-name">Export CSV</div><div class="bill-cat">Save the full spending ledger</div></span>'
       + '</button></li>'
     + '</ul>');
 }
@@ -1717,7 +1721,6 @@ function journalScreen(){
   }
 
   var moreBtn = '<button class="btn-round" aria-label="Search, sort, and filter" style="flex:none;padding:.4rem" onclick="openTrackToolbarMenu()">'+icon("more",16)+'</button>';
-  var csvBtn = '<button class="btn btn-ghost" style="width:auto;padding:.35rem .7rem;font-size:.78rem;flex:none" onclick="exportJournalCsv()">'+icon("down",14)+' CSV</button>';
   var listHeaderLeft;
   if(journalSearchOpen){
     listHeaderLeft = '<div class="field" style="display:flex;align-items:center;gap:.4rem;flex:1;min-width:0;margin:0;padding:0 .4rem 0 .6rem">'
@@ -1731,7 +1734,7 @@ function journalScreen(){
       + (journalSort==="date_desc" ? "Full ledger, newest first" : "Sorted: "+esc(journalSortLabel(journalSort))) + '</span>';
   }
   h += '<div class="row" style="margin:0 0 .6rem">' + listHeaderLeft
-    + '<div style="display:flex;gap:.4rem;align-items:center;flex:none">' + moreBtn + csvBtn + '</div>'
+    + '<div style="display:flex;gap:.4rem;align-items:center;flex:none">' + moreBtn + '</div>'
     + '</div>';
 
   if(visible.length===0){
@@ -1918,6 +1921,10 @@ function openSavingsToolbarMenu(){
       + '<span class="settings-icon">'+icon("filter",18)+'</span>'
       + '<span style="flex:1"><div class="bill-name">Filter</div><div class="bill-cat">'+esc(savingsFilterSummary())+'</div></span>'
       + '</button></li>'
+    + '<li><button class="bill-li" style="width:100%;text-align:left" onclick="closeModal();exportSavingsCsv()">'
+      + '<span class="settings-icon">'+icon("down",18)+'</span>'
+      + '<span style="flex:1"><div class="bill-name">Export CSV</div><div class="bill-cat">Save the full savings ledger</div></span>'
+      + '</button></li>'
     + '</ul>');
 }
 function openSavingsSearch(){
@@ -2018,8 +2025,8 @@ function savingsEntryRow(e){
 function savingsScreen(){
   if(!S.savingsGoals.length){
     return '<section class="card pad"><h2 class="eyebrow">No savings goals yet</h2>'
-      + '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">Set up a goal on the Goals tab, then come back here to log deposits and withdrawals. You can add up to 5 goals.</p>'
-      + '<button class="btn btn-pine" style="width:100%" onclick="setTrackMode(\'goals\');openGoalForm(null)">Go to Goals</button>'
+      + '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">Set up a goal under Tools → Reports → Savings, then come back here to log deposits and withdrawals. You can add up to 5 goals.</p>'
+      + '<button class="btn btn-pine" style="width:100%" onclick="go(\'reports\');toolsSubScreen=\'reports\';reportSubMode=\'savings\';render();openGoalForm(null)">Set up a goal</button>'
       + '</section>';
   }
 
@@ -2050,7 +2057,6 @@ function savingsScreen(){
   }
 
   var moreBtn = '<button class="btn-round" aria-label="Search, sort, and filter savings activity" style="flex:none;padding:.4rem" onclick="openSavingsToolbarMenu()">'+icon("more",16)+'</button>';
-  var csvBtn = '<button class="btn btn-ghost" style="width:auto;padding:.35rem .7rem;font-size:.78rem;flex:none" onclick="exportSavingsCsv()">'+icon("down",14)+' CSV</button>';
   var listHeaderLeft;
   if(savingsSearchOpen){
     listHeaderLeft = '<div class="field" style="display:flex;align-items:center;gap:.4rem;flex:1;min-width:0;margin:0;padding:0 .4rem 0 .6rem">'
@@ -2064,7 +2070,7 @@ function savingsScreen(){
       + (savingsSort==="goal_group" ? "All activity, by goal" : "Sorted: "+esc(savingsSortLabel(savingsSort))) + '</span>';
   }
   h += '<div class="row" style="margin-bottom:.6rem">' + listHeaderLeft
-    + '<div style="display:flex;gap:.4rem;align-items:center;flex:none">' + moreBtn + csvBtn + '</div>'
+    + '<div style="display:flex;gap:.4rem;align-items:center;flex:none">' + moreBtn + '</div>'
     + '</div>';
 
   if(visible.length===0){
