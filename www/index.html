@@ -269,6 +269,7 @@ var KEY = "billfold:v1";
 var MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 var MS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 var CHART_COLORS = ["#1F6F54","#3E7CB1","#C77B30","#7A5AA6","#B2456E","#5C8A3A","#8A6D3B","#4A6670","#9C4DCC","#2E8B8B"];
+var PRIVACY_POLICY_URL = "https://jroot84.github.io/Billfold-PWA/privacy.html";
 
 /* ---------- icons (inline SVG) ---------- */
 function icon(name, size){
@@ -2423,7 +2424,9 @@ function helpDetailCard(){
         "<b>Month</b> — see what’s due this month and mark bills paid.<br><b>Bills</b> — manage your full list of recurring bills, and set budgets for variable spending under Funds.<br><b>Log</b> — log everyday spending, or deposits and withdrawals toward your savings goals.<br><b>Tools</b> — open Reports to see where your money’s going by category and manage savings goals, or Calculator for quick math and investment projections.<br><b>Settings</b> — back up your data, tweak preferences, and find these help pages.");
 }
 function aboutDetailCard(){
-  return '<p style="font-size:.85rem;color:var(--sub);line-height:1.55">Billfold runs entirely on this device. There’s no account, no sign-in, and no server — your bills, spending, and savings never leave your phone unless you choose to back them up yourself. Nothing here is sold, shared, or used to show you ads. You can delete the app at any time and take your data with you as a backup file. It’s your data, fully yours, for as long as you want it.</p>';
+  return '<p style="font-size:.85rem;color:var(--sub);line-height:1.55">Billfold runs entirely on this device. There’s no account, no sign-in, and no server — your bills, spending, and savings never leave your phone unless you choose to back them up yourself. Nothing here is sold, shared, or used to show you ads. You can delete the app at any time and take your data with you as a backup file. It’s your data, fully yours, for as long as you want it.</p>'
+    + '<a href="'+PRIVACY_POLICY_URL+'" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin-top:.9rem;font-size:.85rem;font-weight:600;color:var(--pine)">Read the full Privacy Policy'+icon("right",14)+'</a>'
+    + '<p class="muted" style="font-size:.75rem;margin-top:1rem">Made by SimplyRoot</p>';
 }
 function resetDetailCard(){
   return '<p class="muted" style="font-size:.875rem;margin-bottom:.75rem">Puts back the bills and history from your original spreadsheet, replacing everything here.</p>'
