@@ -319,6 +319,7 @@ function esc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,
 function dueInMonth(b,m){
   if(!b.active) return false;
   if(b.freq==="monthly") return true;
+  if(b.freq==="semimonthly") return true;
   if(b.freq==="even") return m%2===0;
   if(b.freq==="odd") return m%2===1;
   if(b.freq==="yearly") return (b.month||1)===m;
@@ -326,12 +327,14 @@ function dueInMonth(b,m){
 }
 function monthlyEq(b){
   var a = num(b.amount);
+  if(b.freq==="semimonthly") return a*2;
   if(b.freq==="even"||b.freq==="odd") return a/2;
   if(b.freq==="yearly") return a/12;
   return a;
 }
 function freqText(b){
   if(b.freq==="yearly") return "Every "+MS[(b.month||1)-1];
+  if(b.freq==="semimonthly") return "Twice a month"+((b.dueDay&&b.dueDay2)?" (days "+b.dueDay+" & "+b.dueDay2+")":"");
   return {monthly:"Monthly",even:"Even months",odd:"Odd months"}[b.freq]||"Monthly";
 }
 function catColor(cat){
@@ -393,7 +396,7 @@ S.savingsEntries = S.savingsEntries.map(function(e){
 });
 migrateSavingsGoals();
 var view = { screen:"month", y:(new Date()).getFullYear(), m:(new Date()).getMonth()+1 };
-var payId = null, editId = null, confirmDel = false, confirmReset = false, pickerYear = null, reportScope = "month";
+var payId = null, payOcc = 1, editId = null, confirmDel = false, confirmReset = false, pickerYear = null, reportScope = "month";
 var trackMode = "journal";
 var billsSubMode = "bills";
 var calcSubMode = "basic", reportSubMode = "bills";
@@ -434,9 +437,13 @@ var calc = { start:1000, contrib:100, freq:"monthly", rate:7, years:20 };
 /* ---------- derived ---------- */
 function emptyMonth(){ return {balance:0,cards:[0,0,0],oneTime:0,left:{}}; }
 function md(){ return S.months[mk(view.y,view.m)] || emptyMonth(); }
-function leftOf(b, data){
+/* A "semimonthly" bill has two independent due dates within the same month, each tracked
+   separately. Occurrence 1 always uses the plain billId key (so every existing bill's saved
+   "left" data keeps working untouched); occurrence 2 uses a suffixed key. */
+function leftKey(billId, occ){ return occ===2 ? billId+":2" : billId; }
+function leftOf(b, data, occ){
   var d = data || md();
-  var v = d.left ? d.left[b.id] : undefined;
+  var v = d.left ? d.left[leftKey(b.id, occ||1)] : undefined;
   return (v===undefined||v===null) ? num(b.amount) : num(v);
 }
 function dueBills(){ return S.bills.filter(function(b){ return dueInMonth(b, view.m); }); }
@@ -444,7 +451,11 @@ function restOfYear(){
   var sum = 0;
   for(var m=view.m+1; m<=12; m++){
     var data = S.months[mk(view.y,m)] || emptyMonth();
-    S.bills.forEach(function(b){ if(dueInMonth(b,m)) sum += leftOf(b,data); });
+    S.bills.forEach(function(b){
+      if(!dueInMonth(b,m)) return;
+      sum += leftOf(b,data,1);
+      if(b.freq==="semimonthly") sum += leftOf(b,data,2);
+    });
   }
   return sum;
 }
@@ -459,16 +470,17 @@ function touchMonth(){
 }
 function patchMonthField(field, val){ touchMonth()[field] = num(val); persist(); render(); }
 function patchCard(i, val){ touchMonth().cards[i] = num(val); persist(); render(); }
-function setLeft(billId, val){
+function setLeft(billId, val, occ){
   var m = touchMonth();
-  if(val===undefined) delete m.left[billId]; else m.left[billId] = val;
+  var key = leftKey(billId, occ||1);
+  if(val===undefined) delete m.left[key]; else m.left[key] = val;
   persist(); render();
   if(S.remindersOn) scheduleRemindersDebounced();
 }
-function togglePaid(billId){
+function togglePaid(billId, occ){
   var b = S.bills.filter(function(x){return x.id===billId;})[0];
   if(!b) return;
-  if(leftOf(b)===0) setLeft(billId, undefined); else setLeft(billId, 0);
+  if(leftOf(b,null,occ)===0) setLeft(billId, undefined, occ); else setLeft(billId, 0, occ);
 }
 function step(d){
   var m = view.m + d, y = view.y;
@@ -509,9 +521,14 @@ function monthScreen(){
   var data = md(), bills = dueBills();
   var totalDue=0, stillDue=0, paidCount=0;
   bills.forEach(function(b){
-    var l = leftOf(b,data);
-    totalDue += num(b.amount); stillDue += l;
-    if(l===0) paidCount++;
+    if(b.freq==="semimonthly"){
+      var l1 = leftOf(b,data,1), l2 = leftOf(b,data,2);
+      totalDue += num(b.amount)*2; stillDue += l1+l2;
+      if(l1===0 && l2===0) paidCount++;
+    } else {
+      var l = leftOf(b,data); totalDue += num(b.amount); stillDue += l;
+      if(l===0) paidCount++;
+    }
   });
   var cardsTotal = (data.cards||[]).reduce(function(s,c){return s+num(c);},0);
   var afterAll = num(data.balance) - cardsTotal - num(data.oneTime) - stillDue;
@@ -552,19 +569,26 @@ function monthScreen(){
   if(bills.length===0){
     h += '<p class="muted" style="padding:0 1rem 1rem;font-size:.9rem">No bills scheduled this month. Add one from the Bills tab.</p>';
   }
-  h += '<ul class="plain">' + bills.map(function(b){
-    var l = leftOf(b,data), paid = l===0, partial = !paid && l<num(b.amount);
-    return '<li><div class="bill-li">'
-      + '<button class="checkbtn'+(paid?" paid":"")+'" aria-label="'+(paid?"Mark unpaid":"Mark paid")+'" onclick="togglePaid(\''+b.id+'\')">'+(paid?icon("check",15):"")+'</button>'
-      + '<button class="bill-main" onclick="openPay(\''+b.id+'\')">'
-      + '<div><div class="bill-name'+(paid?" done":"")+'">'+esc(b.name)+'</div>'
-      + '<div class="bill-cat"><span class="cat-dot" style="background:'+catColor(b.category)+'"></span>'+esc(b.category)+'</div></div>'
-      + '<div class="bill-amt"><div class="due tnum">'+usd(b.amount)+'</div>'
-      + '<div class="status tnum" style="color:'+(paid?"var(--pine)":"var(--amber)")+'">'
-      + (paid?"Paid":(partial?usd(l)+" left":"Due"))+'</div></div>'
-      + '</button></div></li>';
-  }).join("") + '</ul></section>';
+  h += '<ul class="plain">' + bills.reduce(function(acc,b){ return acc.concat(monthBillRows(b,data)); }, []).join("") + '</ul></section>';
   return h;
+}
+function monthBillRow(b, data, occ, subtitle){
+  var l = leftOf(b,data,occ), paid = l===0, partial = !paid && l<num(b.amount);
+  return '<li><div class="bill-li">'
+    + '<button class="checkbtn'+(paid?" paid":"")+'" aria-label="'+(paid?"Mark unpaid":"Mark paid")+'" onclick="togglePaid(\''+b.id+'\', '+occ+')">'+(paid?icon("check",15):"")+'</button>'
+    + '<button class="bill-main" onclick="openPay(\''+b.id+'\', '+occ+')">'
+    + '<div><div class="bill-name'+(paid?" done":"")+'">'+esc(b.name)+'</div>'
+    + '<div class="bill-cat"><span class="cat-dot" style="background:'+catColor(b.category)+'"></span>'+esc(b.category)+(subtitle?' · '+subtitle:'')+'</div></div>'
+    + '<div class="bill-amt"><div class="due tnum">'+usd(b.amount)+'</div>'
+    + '<div class="status tnum" style="color:'+(paid?"var(--pine)":"var(--amber)")+'">'
+    + (paid?"Paid":(partial?usd(l)+" left":"Due"))+'</div></div>'
+    + '</button></div></li>';
+}
+function monthBillRows(b, data){
+  if(b.freq!=="semimonthly") return [monthBillRow(b, data, 1, null)];
+  var sub1 = b.dueDay ? "1st payment, due day "+b.dueDay : "1st payment";
+  var sub2 = b.dueDay2 ? "2nd payment, due day "+b.dueDay2 : "2nd payment";
+  return [monthBillRow(b, data, 1, sub1), monthBillRow(b, data, 2, sub2)];
 }
 function moneyRow(label, value, handler){
   var v = num(value);
@@ -667,7 +691,8 @@ function billsSortEntries(list){
   var sorted = list.slice();
   if(billsSort==="due_asc"){
     sorted.sort(function(a,b){
-      var da = a.dueDay ? a.dueDay : 999, db = b.dueDay ? b.dueDay : 999;
+      var da = a.dueDay ? Math.min(a.dueDay, a.dueDay2||a.dueDay) : 999;
+      var db = b.dueDay ? Math.min(b.dueDay, b.dueDay2||b.dueDay) : 999;
       return da-db || (a.name||"").localeCompare(b.name||"");
     });
   } else if(billsSort==="amount_desc"){
@@ -1545,11 +1570,11 @@ function fmtDateLabel(iso){
 
 /* --- linking a journal entry to a bill (reuses the same paid/left tracking as the Month screen) --- */
 function monthDataAt(y,m){ return S.months[mk(y,m)] || emptyMonth(); }
-function billLeftAt(y,m,billId){
+function billLeftAt(y,m,billId,occ){
   var bill = S.bills.filter(function(b){ return b.id===billId; })[0];
   if(!bill) return 0;
   var data = monthDataAt(y,m);
-  var v = data.left ? data.left[billId] : undefined;
+  var v = data.left ? data.left[leftKey(billId, occ||1)] : undefined;
   return (v===undefined||v===null) ? num(bill.amount) : num(v);
 }
 function setBillLeftAt(y,m,billId,value){
@@ -2356,21 +2381,27 @@ function remindersCard(){
 function nextReminderFireAt(b){
   var now = new Date();
   var startY = now.getFullYear(), startM = now.getMonth()+1;
+  var occurrences = b.freq==="semimonthly" ? [b.dueDay,b.dueDay2] : [b.dueDay];
+  var earliest = null;
   for(var i=0;i<3;i++){
     var m = startM + i, y = startY;
     while(m>12){ m-=12; y++; }
     if(!dueInMonth(b,m)) continue;
-    if(billLeftAt(y,m,b.id) === 0) continue; // already paid, skip
-    var actualDay = Math.min(b.dueDay, new Date(y,m,0).getDate());
-    var due = new Date(y, m-1, actualDay, 9, 0, 0);
-    var fireAt = new Date(due.getTime() - (num(S.remindDays)*24*60*60*1000));
-    if(fireAt.getTime() <= now.getTime()) continue; // don't count a fire time already in the past
-    return fireAt;
+    occurrences.forEach(function(day, idx){
+      if(!day) return;
+      var occ = idx+1;
+      if(billLeftAt(y,m,b.id,occ) === 0) return; // already paid, skip
+      var actualDay = Math.min(day, new Date(y,m,0).getDate());
+      var due = new Date(y, m-1, actualDay, 9, 0, 0);
+      var fireAt = new Date(due.getTime() - (num(S.remindDays)*24*60*60*1000));
+      if(fireAt.getTime() <= now.getTime()) return; // don't count a fire time already in the past
+      if(!earliest || fireAt.getTime() < earliest.getTime()) earliest = fireAt;
+    });
   }
-  return null;
+  return earliest;
 }
 function remindersBillList(){
-  var bills = S.bills.filter(function(b){ return b.active && b.dueDay; });
+  var bills = S.bills.filter(function(b){ return b.active && (b.dueDay || b.dueDay2); });
   if(!bills.length){
     return '<p class="muted" style="font-size:.85rem">No bills have a due day set yet. Add one from Bills → edit a bill → Due day of month.</p>';
   }
@@ -2484,7 +2515,8 @@ var UPDATE_LOG = [
       "Spending entries can now be explicitly applied to a bill or a fund — no more guessing based on category text.",
       "A new setup wizard walks through income, available balance, and card names the first time you open Billfold.",
       "Added a link to rate Billfold on the Play Store, and a way to support development directly.",
-      "Developer options are now hidden until unlocked, then stick around afterward like a real developer menu."
+      "Developer options are now hidden until unlocked, then stick around afterward like a real developer menu.",
+      "Bills can now be set to \"Twice a month,\" with two independent due dates that are tracked and reminded separately."
     ]
   },
   {
@@ -2585,13 +2617,14 @@ function closeModal(){
 }
 
 /* --- pay --- */
-function openPay(id){
-  payId = id;
+function openPay(id, occ){
+  payId = id; payOcc = occ || 1;
   var b = S.bills.filter(function(x){return x.id===id;})[0];
   if(!b) return;
-  var l = leftOf(b);
+  var l = leftOf(b, null, payOcc);
+  var occNote = b.freq==="semimonthly" ? (payOcc===2 ? " · 2nd payment" : " · 1st payment") : "";
   modal(esc(b.name),
-    '<p class="muted" style="font-size:.875rem;margin-bottom:1rem">'+usd(b.amount)+' · '+freqText(b)+'</p>'
+    '<p class="muted" style="font-size:.875rem;margin-bottom:1rem">'+usd(b.amount)+' · '+freqText(b)+occNote+'</p>'
     + '<div class="grid2" style="margin-bottom:1rem">'
     + '<button class="btn btn-pine" onclick="paySet(0)">'+icon("check",16)+' Paid in full</button>'
     + '<button class="btn btn-ghost" onclick="payClear()">Not paid yet</button></div>'
@@ -2605,11 +2638,11 @@ function openPay(id){
   var inp = document.getElementById("payInput");
   if(inp){ inp.focus(); inp.select(); }
 }
-function paySet(v){ if(payId!==null){ setLeft(payId, v); } closeModal(); }
-function payClear(){ if(payId!==null){ setLeft(payId, undefined); } closeModal(); }
+function paySet(v){ if(payId!==null){ setLeft(payId, v, payOcc); } closeModal(); }
+function payClear(){ if(payId!==null){ setLeft(payId, undefined, payOcc); } closeModal(); }
 function paySave(){
   var inp = document.getElementById("payInput");
-  if(payId!==null && inp){ setLeft(payId, num(inp.value)); }
+  if(payId!==null && inp){ setLeft(payId, num(inp.value), payOcc); }
   closeModal();
 }
 
@@ -2634,14 +2667,18 @@ function openBillForm(id){
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
     + '<input id="bfAmount" class="tnum" inputmode="decimal" value="'+(b?b.amount:"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
     + '<div class="fgroup"><label class="flabel">How often</label>'
-    + '<select id="bfFreq" class="field" onchange="document.getElementById(\'bfMonthWrap\').className=this.value===\'yearly\'?\'\':\'hidden\'">'
+    + '<select id="bfFreq" class="field" onchange="bfFreqChange(this.value)">'
     + '<option value="monthly"'+(freq==="monthly"?" selected":"")+'>Every month</option>'
     + '<option value="even"'+(freq==="even"?" selected":"")+'>Even months (Feb, Apr, Jun…)</option>'
     + '<option value="odd"'+(freq==="odd"?" selected":"")+'>Odd months (Jan, Mar, May…)</option>'
-    + '<option value="yearly"'+(freq==="yearly"?" selected":"")+'>Once a year</option></select>'
+    + '<option value="yearly"'+(freq==="yearly"?" selected":"")+'>Once a year</option>'
+    + '<option value="semimonthly"'+(freq==="semimonthly"?" selected":"")+'>Twice a month (custom days)</option></select>'
     + '<div id="bfMonthWrap" class="'+(freq==="yearly"?"":"hidden")+'"><select id="bfMonth" class="field" style="margin-top:.5rem">'+monthOpts+'</select></div></div>'
-    + '<div class="fgroup"><label class="flabel">Due day of month (optional)</label>'
+    + '<div class="fgroup"><label id="bfDueDayLbl" class="flabel">'+(freq==="semimonthly"?"1st due day":"Due day of month (optional)")+'</label>'
     + '<input id="bfDueDay" class="field" type="number" inputmode="numeric" min="1" max="31" value="'+(b&&b.dueDay?b.dueDay:"")+'" placeholder="e.g. 15">'
+    + '<div id="bfDueDay2Wrap" class="'+(freq==="semimonthly"?"":"hidden")+'" style="margin-top:.5rem">'
+    + '<label class="flabel">2nd due day</label>'
+    + '<input id="bfDueDay2" class="field" type="number" inputmode="numeric" min="1" max="31" value="'+(b&&b.dueDay2?b.dueDay2:"")+'" placeholder="e.g. 30"></div>'
     + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Powers Settings → Reminders. Leave blank if it varies.</p></div>'
     + '<div class="fgroup"><label class="flabel">Category</label>'
     + '<select id="bfCat" class="field" onchange="document.getElementById(\'bfNewCatWrap\').className=this.value===\'__new\'?\'\':\'hidden\'">'+opts+'</select>'
@@ -2652,6 +2689,11 @@ function openBillForm(id){
     + '<p id="bfErr" class="msg-err" style="display:none"></p>'
     + '<button class="btn btn-pine" style="width:100%;margin-top:1rem;padding:.8rem" onclick="bfSave()">'+(b?"Save changes":"Add bill")+'</button>'
     + (b ? '<button id="bfDel" class="btn btn-danger" style="width:100%;margin-top:.5rem" onclick="bfDelete()">Delete this bill</button>' : ''));
+}
+function bfFreqChange(val){
+  document.getElementById("bfMonthWrap").className = val==="yearly" ? "" : "hidden";
+  document.getElementById("bfDueDay2Wrap").className = val==="semimonthly" ? "" : "hidden";
+  document.getElementById("bfDueDayLbl").textContent = val==="semimonthly" ? "1st due day" : "Due day of month (optional)";
 }
 function bfToggle(btn){
   var t = document.getElementById("bfActive"), lbl = document.getElementById("bfActiveLbl");
@@ -2669,6 +2711,8 @@ function bfSave(){
   var month = parseInt(document.getElementById("bfMonth").value,10) || 1;
   var dueDayRaw = parseInt(document.getElementById("bfDueDay").value,10);
   var dueDay = (dueDayRaw>=1 && dueDayRaw<=31) ? dueDayRaw : null;
+  var dueDay2Raw = freq==="semimonthly" ? parseInt(document.getElementById("bfDueDay2").value,10) : NaN;
+  var dueDay2 = (dueDay2Raw>=1 && dueDay2Raw<=31) ? dueDay2Raw : null;
   var active = document.getElementById("bfActive").getAttribute("data-on")==="1";
   var err = document.getElementById("bfErr");
   function fail(m){ err.textContent=m; err.style.display="block"; }
@@ -2676,7 +2720,7 @@ function bfSave(){
   if(!amount) return fail("Enter an amount above zero.");
   if(!cat) return fail("Pick or type a category.");
   var bill = { id: editId || ("b"+Date.now()), name:name, amount:amount, freq:freq,
-    month: freq==="yearly"?month:undefined, dueDay:dueDay, category:cat, active:active };
+    month: freq==="yearly"?month:undefined, dueDay:dueDay, dueDay2: freq==="semimonthly"?dueDay2:undefined, category:cat, active:active };
   var found = false;
   S.bills = S.bills.map(function(b){ if(b.id===bill.id){found=true; return bill;} return b; });
   if(!found) S.bills.push(bill);
@@ -2696,7 +2740,7 @@ function bfDelete(){
   var id = editId;
   S.bills = S.bills.filter(function(b){return b.id!==id;});
   Object.keys(S.months).forEach(function(k){
-    if(S.months[k].left) delete S.months[k].left[id];
+    if(S.months[k].left){ delete S.months[k].left[id]; delete S.months[k].left[id+":2"]; }
   });
   persist(); closeModal(); render();
   if(S.remindersOn) scheduleRemindersDebounced();
@@ -2782,21 +2826,26 @@ function rescheduleReminders(){
       while(m>12){ m-=12; y++; }
       var data = monthDataAt(y,m);
       S.bills.forEach(function(b){
-        if(!b.active || !b.dueDay) return;
+        if(!b.active) return;
         if(b.remindOff) return; // muted individually in Settings → Reminders
         if(!dueInMonth(b,m)) return;
-        if(billLeftAt(y,m,b.id) === 0) return; // already paid, skip
-        var actualDay = Math.min(b.dueDay, new Date(y,m,0).getDate());
-        var due = new Date(y, m-1, actualDay, 9, 0, 0);
-        var fireAt = new Date(due.getTime() - (num(S.remindDays)*24*60*60*1000));
-        if(fireAt.getTime() <= now.getTime()) return; // don't schedule for the past
-        toSchedule.push({
-          id: hashId(b.id+"-"+y+"-"+m),
-          title: b.name + " due soon",
-          body: usd(b.amount) + " due " + MS[m-1] + " " + actualDay,
-          schedule: { at: fireAt },
-          actionTypeId: "BILL_REMINDER",
-          extra: { billId: b.id, y:y, m:m }
+        var occurrences = b.freq==="semimonthly" ? [[1,b.dueDay],[2,b.dueDay2]] : [[1,b.dueDay]];
+        occurrences.forEach(function(pair){
+          var occ = pair[0], day = pair[1];
+          if(!day) return;
+          if(billLeftAt(y,m,b.id,occ) === 0) return; // already paid, skip
+          var actualDay = Math.min(day, new Date(y,m,0).getDate());
+          var due = new Date(y, m-1, actualDay, 9, 0, 0);
+          var fireAt = new Date(due.getTime() - (num(S.remindDays)*24*60*60*1000));
+          if(fireAt.getTime() <= now.getTime()) return; // don't schedule for the past
+          toSchedule.push({
+            id: hashId(b.id+"-"+y+"-"+m+"-"+occ),
+            title: b.name + " due soon",
+            body: usd(b.amount) + " due " + MS[m-1] + " " + actualDay,
+            schedule: { at: fireAt },
+            actionTypeId: "BILL_REMINDER",
+            extra: { billId: b.id, y:y, m:m, occ:occ }
+          });
         });
       });
     }
@@ -2829,28 +2878,28 @@ function setRemindersOn(on){
 // Marks one bill fully paid for a specific month/year — used by the notification's
 // "Mark paid" button, which targets the exact month the reminder was about rather
 // than whatever month happens to be on screen when it's tapped.
-function markBillPaidAt(billId, y, m){
+function markBillPaidAt(billId, y, m, occ){
   var k = mk(y,m);
   if(!S.months[k]) S.months[k] = emptyMonth();
   if(!S.months[k].left) S.months[k].left = {};
   if(!S.months[k].cards) S.months[k].cards = [0,0,0];
-  S.months[k].left[billId] = 0;
+  S.months[k].left[leftKey(billId, occ||1)] = 0;
   persist();
   if(view.y===y && view.m===m) render();
   if(S.remindersOn) scheduleRemindersDebounced();
 }
 // Jumps to the Month screen for the reminder's month and opens that bill's pay sheet —
 // used by the notification's "View" button and by tapping the notification body itself.
-function viewBillFromReminder(billId, y, m){
+function viewBillFromReminder(billId, y, m, occ){
   view.y = y; view.m = m;
   go("month");
-  openPay(billId);
+  openPay(billId, occ);
 }
 function onReminderAction(action){
   var extra = action && action.notification && action.notification.extra;
   if(!extra || !extra.billId) return;
-  if(action.actionId === "paid") markBillPaidAt(extra.billId, extra.y, extra.m);
-  else viewBillFromReminder(extra.billId, extra.y, extra.m); // "view" and the default tap both land here
+  if(action.actionId === "paid") markBillPaidAt(extra.billId, extra.y, extra.m, extra.occ);
+  else viewBillFromReminder(extra.billId, extra.y, extra.m, extra.occ); // "view" and the default tap both land here
 }
 function initReminderActions(){
   if(!nativeNotifReady()) return;
