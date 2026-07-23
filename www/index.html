@@ -307,7 +307,7 @@ function icon(name, size){
 }
 
 /* ---------- helpers ---------- */
-function num(v){ var n = parseFloat(v); return isFinite(n) ? n : 0; }
+function num(v){ var n = parseFloat(v); n = isFinite(n) ? n : 0; return Math.round(n*100)/100; }
 function usd(n){
   var v = num(n);
   return new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",
@@ -1717,7 +1717,7 @@ function setBillLeftAtOcc(y,m,billId,value,occ){
     var beforeAmt = (beforeRaw===undefined) ? fullAmountFor(b, S.months[k], occ) : num(beforeRaw);
     var afterAmt = (value===undefined) ? fullAmountFor(b, S.months[k], occ) : num(value);
     var delta = beforeAmt - afterAmt; // positive = paying down further, negative = un-paying
-    if(delta) S.months[k].balance = num(S.months[k].balance) - delta;
+    if(delta) S.months[k].balance = num(num(S.months[k].balance) - delta);
   }
   if(value===undefined) delete S.months[k].left[key]; else S.months[k].left[key] = value;
 }
@@ -1727,13 +1727,13 @@ function applyBalanceAdjust(entry){
   if(!entry.balanceAdjust) return;
   var k = mk(entry.balanceAdjust.y, entry.balanceAdjust.m);
   if(!S.months[k]) S.months[k] = emptyMonth();
-  S.months[k].balance = num(S.months[k].balance) - num(entry.balanceAdjust.amount);
+  S.months[k].balance = num(num(S.months[k].balance) - num(entry.balanceAdjust.amount));
 }
 function revertBalanceAdjust(entry){
   if(!entry.balanceAdjust) return;
   var k = mk(entry.balanceAdjust.y, entry.balanceAdjust.m);
   if(!S.months[k]) S.months[k] = emptyMonth();
-  S.months[k].balance = num(S.months[k].balance) + num(entry.balanceAdjust.amount);
+  S.months[k].balance = num(num(S.months[k].balance) + num(entry.balanceAdjust.amount));
 }
 
 
@@ -1970,7 +1970,7 @@ function openJournalForm(id){
     + '<input id="jfName" class="field" value="'+(e?esc(e.name):"")+'" placeholder="e.g. Groceries run"></div>'
     + '<div class="fgroup"><label class="flabel">Amount</label>'
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
-    + '<input id="jfAmount" class="tnum" inputmode="decimal" value="'+(e?e.amount:"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
+    + '<input id="jfAmount" class="tnum" inputmode="decimal" value="'+(e?num(e.amount):"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
     + '<div class="fgroup"><label class="flabel">Date</label>'
     + '<input id="jfDate" type="date" class="field" value="'+esc(date)+'" oninput="jfRefreshBalanceLabel()"></div>'
     + '<div class="fgroup"><label class="flabel">Fund</label>'
@@ -2375,7 +2375,7 @@ function openGoalForm(id){
     + '<input id="sgName" class="field" value="'+(g?esc(g.name):"")+'" placeholder="e.g. Emergency fund"></div>'
     + '<div class="fgroup"><label class="flabel">Target amount</label>'
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
-    + '<input id="sgTarget" class="tnum" inputmode="decimal" value="'+(g?g.target:"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
+    + '<input id="sgTarget" class="tnum" inputmode="decimal" value="'+(g?num(g.target):"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
     + '<p id="sgErr" class="msg-err" style="display:none"></p>'
     + '<button class="btn btn-pine" style="width:100%;margin-top:1rem;padding:.8rem" onclick="sgSave()">'+(g?"Save changes":"Add goal")+'</button>'
     + (g ? '<button id="sgDel" class="btn btn-danger" style="width:100%;margin-top:.5rem" onclick="sgDelete()">Delete this goal</button>'
@@ -2438,7 +2438,7 @@ function openSavingsEntryForm(id){
     + '</div><input type="hidden" id="seType" value="'+type+'"></div>'
     + '<div class="fgroup"><label class="flabel">Amount</label>'
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
-    + '<input id="seAmount" class="tnum" inputmode="decimal" value="'+(e?e.amount:"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
+    + '<input id="seAmount" class="tnum" inputmode="decimal" value="'+(e?num(e.amount):"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
     + '<div class="fgroup"><label class="flabel">Date</label>'
     + '<input id="seDate" type="date" class="field" value="'+esc(e?e.date:today)+'"></div>'
     + '<div class="fgroup"><label class="flabel">Note (optional)</label>'
@@ -2726,10 +2726,11 @@ var UPDATE_LOG = [
       "\"Start over\" in Settings erases everything and relaunches the welcome message and setup wizard, same as a fresh install.",
       "Combined the Play Store rating link and the donation link into one \"Enjoying Billfold?\" card; removed the \"Note to self\" field.",
       "Renamed the 3 \"card names\" slots to one-time expenses, editable by tapping the name directly on the Month screen.",
-      "Help now includes a glossary — Bill, Fund, Spending entry, Savings entry, Goal — each with a definition and a link straight to that item's add screen.",
+      "Help now includes a glossary — Fixed expense, Variable expense, Fund, Spending entry, Savings entry, Goal — each with a definition and a link straight to that item's add screen.",
       "A reached savings goal now says so plainly (\"Goal reached! \ud83c\udf89\") instead of just showing 100% with $0 left to go.",
       "Added \"Load sample data\" to Developer options for trying the app out, and a discreet way to unlock Developer options on the web preview.",
-      "Modals auto-focus their first field on desktop/web, so you can start typing or tab through without an extra click."
+      "Modals auto-focus their first field on desktop/web, so you can start typing or tab through without an extra click.",
+      "Fixed a rounding bug: repeated automatic balance adjustments could drift a few fractions of a cent past 2 decimal places over time. Every amount is now snapped to the nearest cent the moment it's entered or calculated, so this can't recur — and reopening an existing entry now displays a clean number even if it was affected before."
     ]
   },
   {
@@ -2966,7 +2967,7 @@ function paySaveActual(){
   // Preserve any payment already made by shifting "still owed" by the same delta, so a
   // partial payment made against the old estimate isn't silently lost or duplicated.
   if(data.left && data.left[key]!==undefined && data.left[key]!==null){
-    data.left[key] = Math.max(0, num(data.left[key]) + (newVal - oldFull));
+    data.left[key] = num(Math.max(0, num(data.left[key]) + (newVal - oldFull)));
   }
   persist(); render();
   openPay(payId, payOcc); // reopen so "amount still owed" and everything else reflects the update
@@ -3076,7 +3077,7 @@ function openExpenseForm(id, defaultType){
   var hasDueDay = !!(e && (e.dueDay || e.dueDay2));
   var remindOn = e ? !e.remindOff : false;
   var isGoalCat = cat.indexOf("__goal__")===0;
-  var amountVal = e ? (type==="fund" ? e.budget : (type==="variable" ? e.estimate : e.amount)) : "";
+  var amountVal = e ? num(type==="fund" ? e.budget : (type==="variable" ? e.estimate : e.amount)) : "";
   var typeHelpText = { fixed:"A known amount, due on a schedule — rent, insurance, a subscription. Marking it paid always reduces Available now.",
     variable:"Due on a schedule, but the amount changes — set an estimate, then enter the real total anytime, paid or not.",
     fund:"A monthly budget for spending that varies — groceries, gas. This is the only thing spending entries can pull from." };
@@ -3919,7 +3920,7 @@ function onboardStep2(){
     + '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">Keeping this current is what lets Billfold tell you whether you\'re actually on track, so it\'s worth a quick update whenever your balance changes.</p>'
     + '<div class="fgroup"><label class="flabel">Available now</label>'
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
-    + '<input id="obBalance" class="tnum" inputmode="decimal" value="'+(data.balance?data.balance:"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
+    + '<input id="obBalance" class="tnum" inputmode="decimal" value="'+(data.balance?num(data.balance):"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
     + '<button class="btn btn-pine" style="width:100%;margin-top:1.25rem;padding:.8rem" onclick="onboardSaveStep2()">Continue</button>'
     + '<button class="btn btn-ghost" style="width:100%;margin-top:.5rem" onclick="onboardStep3()">Skip for now</button>');
 }
