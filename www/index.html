@@ -2790,7 +2790,11 @@ function helpItem(title, bodyHtml){
   return '<details><summary>'+esc(title)+'</summary><div class="body">'+bodyHtml+'</div></details>';
 }
 function doReset(){
-  if(confirmReset){ S = seedState(); confirmReset=false; persist(); render(); }
+  if(confirmReset){
+    S = seedState(); confirmReset=false; persist();
+    closeSettingsSection(); render();
+    showWelcomeModal("closeModal();startOnboarding()");
+  }
   else { confirmReset = true; render(); setTimeout(function(){ confirmReset=false; try{render();}catch(e){} }, 4000); }
 }
 
