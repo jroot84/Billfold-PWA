@@ -218,8 +218,6 @@
   .toggle.on{ background:var(--pine); justify-content:flex-end; }
   .toggle .knob{ width:18px; height:18px; border-radius:999px; background:#fff; }
 
-  .note-box{ margin-top:.75rem; font-size:.75rem; color:var(--sub); background:var(--paper);
-    border-radius:.5rem; padding:.6rem .7rem; }
   details{ border-top:1px solid var(--line); }
   details:first-of-type{ border-top:none; }
   details summary{ cursor:pointer; font-weight:600; font-size:.875rem; padding:.65rem 0;
@@ -348,8 +346,7 @@ function seedState(){
   return {
     version:1,
     income:0,
-    note:"",
-    cardNames:["Credit Card 1","Credit Card 2","Credit Card 3"],
+    cardNames:["Expense 1","Expense 2","Expense 3"],
     categories:[],
     bills:[],
     funds:[],
@@ -395,6 +392,7 @@ S.savingsEntries = S.savingsEntries.map(function(e){
   return { id:e.id, date:e.date, note:e.note||"", type:type, amount:Math.abs(amt), goalId:e.goalId };
 });
 migrateSavingsGoals();
+migrateOneTimeExpenses();
 var view = { screen:"month", y:(new Date()).getFullYear(), m:(new Date()).getMonth()+1 };
 var payId = null, payOcc = 1, editId = null, confirmDel = false, confirmReset = false, pickerYear = null, reportScope = "month";
 var trackMode = "journal";
@@ -435,7 +433,28 @@ var calcTargetInput = null;     // the input a popup calc will write back to
 var calc = { start:1000, contrib:100, freq:"monthly", rate:7, years:20 };
 
 /* ---------- derived ---------- */
-function emptyMonth(){ return {balance:0,cards:[0,0,0],oneTime:0,left:{}}; }
+function emptyMonth(){ return {balance:0,cards:[0,0,0],left:{}}; }
+/* One-time expenses used to be two separate things: 3 named "card" slots, plus a single
+   unnamed "One-time expenses" amount. They've been merged into just the 3 named slots
+   (see S.cardNames). This folds any old per-month oneTime amount into the first slot once,
+   then removes the field so it isn't double-counted or shown again. */
+function migrateOneTimeExpenses(){
+  if(S.migratedOneTime) return;
+  var oldDefaults = ["Credit Card 1","Credit Card 2","Credit Card 3"];
+  if(S.cardNames && S.cardNames.length===3 && oldDefaults.every(function(n,i){ return S.cardNames[i]===n; })){
+    S.cardNames = ["Expense 1","Expense 2","Expense 3"];
+  }
+  Object.keys(S.months||{}).forEach(function(key){
+    var mo = S.months[key];
+    if(!mo) return;
+    if(!mo.cards) mo.cards = [0,0,0];
+    var ot = num(mo.oneTime);
+    if(ot) mo.cards[0] = num(mo.cards[0]) + ot;
+    delete mo.oneTime;
+  });
+  S.migratedOneTime = true;
+  persist();
+}
 function md(){ return S.months[mk(view.y,view.m)] || emptyMonth(); }
 /* A "semimonthly" bill has two independent due dates within the same month, each tracked
    separately. Occurrence 1 always uses the plain billId key (so every existing bill's saved
@@ -531,7 +550,7 @@ function monthScreen(){
     }
   });
   var cardsTotal = (data.cards||[]).reduce(function(s,c){return s+num(c);},0);
-  var afterAll = num(data.balance) - cardsTotal - num(data.oneTime) - stillDue;
+  var afterAll = num(data.balance) - cardsTotal - stillDue;
   var pct = totalDue>0 ? Math.round((totalDue-stillDue)/totalDue*100) : 100;
   var roy = restOfYear();
 
@@ -549,25 +568,25 @@ function monthScreen(){
 
   h += '<section class="card pad"><h2 class="eyebrow">My money</h2>'
     + moneyRow("Available now (your balance)", data.balance, "patchMonthField('balance', this.value)")
-    + S.cardNames.map(function(cn,i){ return moneyRow(esc(cn), (data.cards||[])[i], "patchCard("+i+", this.value)"); }).join("")
-    + moneyRow("One-time expenses", data.oneTime, "patchMonthField('oneTime', this.value)")
+    + S.cardNames.map(function(cn,i){ return oneTimeExpenseRow(i, cn, (data.cards||[])[i]); }).join("")
     + '<div class="divider"></div>'
     + '<div class="row"><span class="lbl">Still due this month</span>'
     + '<span class="tnum" style="font-weight:700;color:'+(stillDue>0?"var(--amber)":"var(--pine)")+'">'+usd(stillDue)+'</span></div>'
     + '<div class="hero" style="background:'+(afterAll>=0?"var(--pine-soft)":"var(--amber-soft)")+'">'
-    + '<span style="font-weight:600;font-size:.9rem">After bills + cards</span>'
+    + '<span style="font-weight:600;font-size:.9rem">After bills + one-time expenses</span>'
     + '<span class="amt tnum" style="color:'+(afterAll>=0?"var(--pine)":"var(--red)")+'">'+usd(afterAll)+'</span></div>'
     + '<div class="row" style="margin-top:.6rem"><span class="muted" style="font-size:.75rem">Rest of '+view.y+' — left to fund</span>'
     + '<span class="tnum muted" style="font-size:.75rem;font-weight:600">'+usd(roy)+'</span></div>'
-    + (cardsTotal+num(data.oneTime)>0
-        ? '<div class="muted" style="font-size:.75rem;margin-top:.25rem">Includes '+usd(cardsTotal)+' on cards'+(num(data.oneTime)>0?' and '+usd(data.oneTime)+' one-time':'')+'.</div>'
+    + (cardsTotal>0
+        ? '<div class="muted" style="font-size:.75rem;margin-top:.25rem">Includes '+usd(cardsTotal)+' in one-time expenses.</div>'
         : '')
     + '</section>';
 
   h += '<section class="card"><div class="list-head"><h2 class="eyebrow" style="margin:0">Bills due in '+MS[view.m-1]+'</h2>'
     + '<span class="muted" style="font-size:.75rem">tap a bill to update</span></div>';
   if(bills.length===0){
-    h += '<p class="muted" style="padding:0 1rem 1rem;font-size:.9rem">No bills scheduled this month. Add one from the Bills tab.</p>';
+    h += '<p class="muted" style="padding:0 1rem .5rem;font-size:.9rem">No bills scheduled this month.</p>'
+      + '<button class="btn btn-pine" style="width:calc(100% - 2rem);margin:0 1rem 1rem" onclick="billsSubMode=\'bills\';go(\'bills\');openBillForm(null)">+ Add a bill</button>';
   }
   h += '<ul class="plain">' + bills.reduce(function(acc,b){ return acc.concat(monthBillRows(b,data)); }, []).join("") + '</ul></section>';
   return h;
@@ -595,6 +614,27 @@ function moneyRow(label, value, handler){
   return '<div class="row"><span class="lbl">'+label+'</span>'
     + '<div class="money"><span>$</span><input class="tnum" inputmode="decimal" value="'+(v?v:"")+'" placeholder="0" '
     + 'onchange="'+handler+'" onkeydown="if(event.key===\'Enter\')this.blur()">'+calcBtn()+'</div></div>';
+}
+/* One-time expense rows (formerly "cards") — the name is editable right here on Month, by
+   tapping it, instead of only from Settings. */
+function oneTimeExpenseRow(i, name, value){
+  var v = num(value);
+  return '<div class="row">'
+    + '<button style="all:unset;cursor:pointer;font-size:.9rem;max-width:48%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-decoration:underline dotted;text-underline-offset:2px" '
+    + 'aria-label="Rename '+esc(name)+'" onclick="renameOneTimeSlot('+i+')">'+esc(name)+'</button>'
+    + '<div class="money"><span>$</span><input class="tnum" inputmode="decimal" value="'+(v?v:"")+'" placeholder="0" '
+    + 'onchange="patchCard('+i+', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()">'+calcBtn()+'</div></div>';
+}
+function renameOneTimeSlot(i){
+  modal("Rename one-time expense",
+    '<div class="fgroup"><label class="flabel">Name</label>'
+    + '<input id="oneTimeName" class="field" value="'+esc(S.cardNames[i])+'" placeholder="e.g. Car repair"></div>'
+    + '<button class="btn btn-pine" style="width:100%;margin-top:1rem;padding:.8rem" onclick="saveOneTimeSlotName('+i+')">Save</button>');
+}
+function saveOneTimeSlotName(i){
+  var v = (document.getElementById("oneTimeName").value||"").trim();
+  S.cardNames[i] = v || S.cardNames[i];
+  persist(); closeModal(); render();
 }
 
 /* ---------- Bills screen ---------- */
@@ -730,7 +770,6 @@ function billsSection(){
     + '<div class="row"><span class="muted">Left over (typical month)</span>'
     + '<span class="tnum" style="font-weight:700;color:'+(leftover>=0?"var(--pine)":"var(--red)")+'">'+usd(leftover)+'</span></div>'
     + '</div>'
-    + (S.note ? '<div class="note-box">'+esc(S.note)+'</div>' : '')
     + '</section>';
 
   if(S.bills.length===0) return h;
@@ -1095,11 +1134,9 @@ function reportsSection(){
       + '<button style="'+pStyle+'" class="'+(reportScope==="month"?"on":"")+'" onclick="reportScope=\'month\';render()">'+MS[view.m-1]+' '+view.y+'</button>'
       + '<button style="'+pStyle+'" class="'+(reportScope==="year"?"on":"")+'" onclick="reportScope=\'year\';render()">'+view.y+'</button>'
       + '</div>';
-  } else if(S.savingsGoals.length<5){
-    // Savings has no month/year scope (goals aren't period-based) — use that space for
-    // goal management instead, since this is now where goals are added/edited/deleted too.
-    scopeSeg = '<button class="btn btn-pine" style="padding:.4rem .85rem;border-radius:999px;flex:none" onclick="openGoalForm(null)">+ Add goal</button>';
   }
+  // Adding goals now lives in Settings → Savings goals (and the setup wizard). Reports still
+  // lets you tap a goal card to edit it, and still nudges toward Settings if none exist yet.
   var row = '<div class="row" style="flex-wrap:wrap;row-gap:.5rem;margin-bottom:1rem">' + subSeg + scopeSeg + '</div>';
   if(reportSubMode==="spending") return row + spendingReportBody();
   if(reportSubMode==="savings") return row + savingsReportBody();
@@ -1554,7 +1591,9 @@ function trackScreen(){
     + '<button class="'+(trackMode==="savings"?"on":"")+'" onclick="setTrackMode(\'savings\')">Savings</button>'
     + '</div>';
   var addBtn = trackMode==="savings"
-    ? '<button class="btn btn-pine" style="padding:.4rem .85rem;border-radius:999px;flex:none" onclick="openSavingsEntryForm(null)">+ Add savings</button>'
+    ? (S.savingsGoals.length
+        ? '<button class="btn btn-pine" style="padding:.4rem .85rem;border-radius:999px;flex:none" onclick="openSavingsEntryForm(null)">+ Add savings</button>'
+        : '')
     : '<button class="btn btn-pine" style="padding:.4rem .85rem;border-radius:999px;flex:none" onclick="openJournalForm(null)">+ Add entry</button>';
   var row = '<div class="row" style="flex-wrap:wrap;row-gap:.5rem;margin-bottom:1rem">' + seg + addBtn + '</div>';
   var body = trackMode==="savings" ? savingsScreen() : journalScreen();
@@ -2122,8 +2161,8 @@ function savingsEntryRow(e){
 function savingsScreen(){
   if(!S.savingsGoals.length){
     return '<section class="card pad"><h2 class="eyebrow">No savings goals yet</h2>'
-      + '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">Set up a goal under Tools → Reports → Savings, then come back here to log deposits and withdrawals. You can add up to 5 goals.</p>'
-      + '<button class="btn btn-pine" style="width:100%" onclick="go(\'reports\');toolsSubScreen=\'reports\';reportSubMode=\'savings\';render();openGoalForm(null)">Set up a goal</button>'
+      + '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">You need a goal before you can log a deposit or withdrawal. Set one up below, then come back here to log against it. You can add up to 5 goals.</p>'
+      + '<button class="btn btn-pine" style="width:100%" onclick="openGoalForm(null)">Set up a goal</button>'
       + '</section>';
   }
 
@@ -2247,18 +2286,21 @@ function sgDelete(){
   persist(); closeModal(); render();
 }
 function openSavingsEntryForm(id){
-  if(!S.savingsGoals.length){ go("reports"); toolsSubScreen="reports"; reportSubMode="savings"; render(); openGoalForm(null); return; } // need a goal to log against first
+  if(!S.savingsGoals.length){ trackMode="savings"; go("track"); return; } // need a goal to log against first — shows the empty-state prompt
   sEditId = id; sConfirmDel = false;
   var e = id ? S.savingsEntries.filter(function(x){ return x.id===id; })[0] : null;
   var today = new Date().toISOString().slice(0,10);
   var type = e && e.type==="withdrawal" ? "withdrawal" : "deposit";
   var goalId = e ? e.goalId : (ensureActiveSavingsGoal()||{}).id;
+  var oneGoal = S.savingsGoals.length===1 ? S.savingsGoals[0] : null;
   var goalField = S.savingsGoals.length>1
     ? '<div class="fgroup"><label class="flabel">Goal</label>'
       + '<select id="seGoal" class="field">' + S.savingsGoals.map(function(g){
           return '<option value="'+esc(g.id)+'"'+(g.id===goalId?" selected":"")+'>'+esc(g.name)+'</option>';
         }).join("") + '</select></div>'
-    : '<input type="hidden" id="seGoal" value="'+esc(goalId||"")+'">';
+    : '<div class="fgroup"><label class="flabel">Goal</label>'
+      + '<div class="field" style="display:flex;align-items:center;color:var(--sub)">'+(oneGoal?esc(oneGoal.name):"—")+'</div>'
+      + '<input type="hidden" id="seGoal" value="'+esc(goalId||"")+'"></div>';
   modal(e ? "Edit entry" : "Add an entry",
     goalField
     + '<div class="fgroup"><label class="flabel">Type</label>'
@@ -2431,7 +2473,7 @@ function toggleBillRemind(id){
 /* ---------- Settings: list + drill-down detail pattern ---------- */
 var SETTINGS_SECTIONS = [
   ["backup", "Back up & restore", "Save a copy, move to a new phone", "down"],
-  ["notes", "Card names & notes", "Rename cards, jot a note to yourself", "list"],
+  ["goals", "Savings goals", "Add, rename, or remove goals", "trend"],
   ["reminders", "Reminders", "Get a heads-up before bills are due", "calendar"],
   ["appearance", "Appearance", "Light, dark, or match your device", "theme"],
   ["lock", "App lock", "Require a PIN to open Billfold", "lock"],
@@ -2488,10 +2530,10 @@ function dataScreen(){
 }
 function settingsDetailScreen(key){
   if(key==="dev" && !devUnlocked){ settingsSubScreen = null; return settingsListScreen(); }
-  var titles = {backup:"Back up & restore", notes:"Card names & notes", reminders:"Reminders", appearance:"Appearance", lock:"App lock", help:"Help", about:"About Billfold", updates:"What's new", reset:"Start over", dev:"Developer options"};
+  var titles = {backup:"Back up & restore", goals:"Savings goals", reminders:"Reminders", appearance:"Appearance", lock:"App lock", help:"Help", about:"About Billfold", updates:"What's new", reset:"Start over", dev:"Developer options"};
   var body;
   if(key==="backup") body = backupDetailCard();
-  else if(key==="notes") body = notesDetailCard();
+  else if(key==="goals") body = goalsSettingsCard();
   else if(key==="reminders") body = remindersCard();
   else if(key==="appearance") body = appearanceCard();
   else if(key==="lock") body = lockCard();
@@ -2508,6 +2550,18 @@ function settingsDetailScreen(key){
    couple around so people can see recent history, not just whatever's brand new. version/date
    are just display labels; nothing else in the app reads them. */
 var UPDATE_LOG = [
+  {
+    version: "1.2",
+    date: "July 2026",
+    notes: [
+      "The Play Store rating link and the donation link are now combined into a single \"Enjoying Billfold?\" card.",
+      "Renamed \"card names\" to one-time expenses, since that's how most people actually use those 3 slots — rename them right on the Month screen by tapping the name, no more trip to Settings. The old separate \"One-time expenses\" field is gone, folded into these slots.",
+      "Adding a savings goal now lives in Settings → Savings goals (and the setup wizard), instead of only from Reports. Reports still prompts you to add one if you don't have any yet.",
+      "Help now includes a glossary — Bill, Fund, Spending entry, Savings entry, Goal — each with a definition and a link straight to that item's add screen.",
+      "Bill reminders are now opt-in: a toggle appears on the bill form once you set a due day, instead of turning on automatically.",
+      "Removed the \"Note to self\" field — it wasn't pulling its weight."
+    ]
+  },
   {
     version: "1.1",
     date: "July 2026",
@@ -2549,14 +2603,27 @@ function backupDetailCard(){
     + '</div>'
     + '<p class="muted" style="font-size:.75rem;margin-top:.7rem"><b>Back up</b> makes a file and lets you pick the name and where to save it (Files, Drive, email…). Use the same name and choose “Replace” if asked, to overwrite the old copy instead of piling up new ones. <b>Restore</b> opens a saved backup file and loads it. Restoring replaces the data on that device, so restore before making new edits there.</p>';
 }
-function notesDetailCard(){
-  return '<label class="flabel">Card names (shown on the Month screen)</label>'
-    + S.cardNames.map(function(cn,i){
-        return '<input class="field" style="margin-bottom:.5rem" value="'+esc(cn)+'" onchange="S.cardNames['+i+']=this.value;persist();render()">';
-      }).join("")
-    + '<label class="flabel" style="margin-top:.5rem">Note to self</label>'
-    + '<textarea class="field" style="min-height:70px" onchange="S.note=this.value;persist()" '
-    + 'placeholder="e.g. money that moves automatically and isn\'t tracked here">'+esc(S.note)+'</textarea>';
+function goalsSettingsCard(){
+  if(!S.savingsGoals.length){
+    return '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">No goals yet. Give one a name and a target, then log deposits from Log → Savings. You can add up to 5.</p>'
+      + '<button class="btn btn-pine" style="width:100%" onclick="openGoalForm(null)">+ Add goal</button>';
+  }
+  var h = '<ul class="plain">' + S.savingsGoals.map(function(g){
+    var saved = savingsTotalFor(g.id);
+    var target = num(g.target);
+    var pct = target>0 ? Math.max(0, Math.min(100, saved/target*100)) : 0;
+    return '<li><button class="bill-li" style="width:100%;text-align:left" onclick="openGoalForm(\''+g.id+'\')">'
+      + '<div style="flex:1"><div class="bill-name">'+esc(g.name)+'</div>'
+      + '<div class="bill-cat">'+usd(saved)+' of '+usd(target)+' · '+Math.round(pct)+'%</div></div>'
+      + '<span style="color:var(--sub)">'+icon("right",18)+'</span>'
+      + '</button></li>';
+  }).join("") + '</ul>';
+  if(S.savingsGoals.length<5){
+    h += '<button class="btn btn-pine" style="width:100%;margin-top:.75rem" onclick="openGoalForm(null)">+ Add goal</button>';
+  } else {
+    h += '<p class="muted" style="font-size:.75rem;margin-top:.75rem">You’ve reached the 5-goal limit. Delete or rename an existing goal to make room for a new one.</p>';
+  }
+  return h;
 }
 function helpDetailCard(){
   return helpItem("Set up your bills",
@@ -2566,23 +2633,38 @@ function helpDetailCard(){
     + helpItem("Track what’s paid",
         "Open the Month tab. Every bill due that month shows up on its own, pulled straight from your Bills list. Tap the circle next to a bill to mark it paid in full, or tap the bill itself to enter a partial amount. Switch months with the arrows, or tap the month name to jump anywhere, past or future.")
     + helpItem("Save toward a goal",
-        "Go to Tools → Reports → Savings and tap “+ Add goal” to name it and set a target — you can keep up to 5 at a time. Log deposits and withdrawals against a goal from Log → Savings; each goal’s card shows what’s saved, what’s left, and how close you are. Tap a goal’s card any time to edit its target or delete it — deleting keeps its logged deposits on record, grouped under “Other.”")
+        "Go to Settings → Savings goals (or add one the first time you open Billfold) to name a goal and set a target — you can keep up to 5 at a time. Log deposits and withdrawals against a goal from Log → Savings; each goal’s card shows what’s saved, what’s left, and how close you are. Tap a goal any time to edit its target or delete it — deleting keeps its logged deposits on record, grouped under “Other.”")
     + helpItem("Back up and move your data",
         "Everything saves automatically on this device as you use it — there’s nothing to press. To keep a safety copy, or move your data to a new phone, go to Settings → Back up & restore and choose a name and where to save the file. On the new device, open Billfold and use Settings → Back up & restore → Restore to load it back in. Restoring replaces what’s already on that device, so restore before making new edits there.")
     + helpItem("What each tab does",
-        "<b>Month</b> — see what’s due this month and mark bills paid.<br><b>Bills</b> — manage your full list of recurring bills, and set budgets for variable spending under Funds.<br><b>Log</b> — log everyday spending, or deposits and withdrawals toward your savings goals.<br><b>Tools</b> — open Reports to see where your money’s going by category and manage savings goals, or Calculator for quick math and investment projections.<br><b>Settings</b> — back up your data, tweak preferences, and find these help pages.");
+        "<b>Month</b> — see what’s due this month and mark bills paid.<br><b>Bills</b> — manage your full list of recurring bills, and set budgets for variable spending under Funds.<br><b>Log</b> — log everyday spending, or deposits and withdrawals toward your savings goals.<br><b>Tools</b> — open Reports to see where your money’s going by category, or Calculator for quick math and investment projections.<br><b>Settings</b> — back up your data, manage savings goals, tweak preferences, and find these help pages.")
+    + '<div class="divider" style="margin:1rem 0"></div>'
+    + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.25rem">Glossary</h3>'
+    + glossaryItem("Bill", "A recurring, fixed-amount expense — rent, a subscription, insurance — that repeats on a schedule you set.", "Add a bill", "billsSubMode='bills';go('bills');openBillForm(null)")
+    + glossaryItem("Fund", "A monthly budget for a category of spending that varies, like groceries or gas, instead of a fixed bill amount.", "Set up a fund", "billsSubMode='funds';go('bills');openFundForm(null)")
+    + glossaryItem("Spending entry", "A single day-to-day expense logged in your ledger, tagged with a category.", "Log a spending entry", "trackMode='journal';go('track');openJournalForm(null)")
+    + glossaryItem("Savings entry", "A deposit or withdrawal logged against one of your savings goals.", "Log a savings entry", "trackMode='savings';go('track');openSavingsEntryForm(null)")
+    + glossaryItem("Goal", "A named savings target with a dollar amount — up to 5 at a time — that your savings entries count toward.", "Add a goal", "openSettingsSection('goals');openGoalForm(null)");
+}
+function glossaryItem(term, def, linkLabel, onclick){
+  return '<div style="margin-bottom:.85rem">'
+    + '<div style="font-weight:600;font-size:.85rem">'+esc(term)+'</div>'
+    + '<div class="muted" style="font-size:.82rem;line-height:1.5;margin:.15rem 0 .35rem">'+esc(def)+'</div>'
+    + '<button style="all:unset;cursor:pointer;font-size:.8rem;font-weight:600;color:var(--pine)" onclick="'+onclick+'">'+esc(linkLabel)+' '+icon("right",12)+'</button>'
+    + '</div>';
 }
 function aboutDetailCard(){
   return '<p style="font-size:.85rem;color:var(--sub);line-height:1.55">Billfold runs entirely on this device. There’s no account, no sign-in, and no server — your bills, spending, and savings never leave your phone unless you choose to back them up yourself. Nothing here is sold, shared, or used to show you ads. You can delete the app at any time and take your data with you as a backup file. It’s your data, fully yours, for as long as you want it.</p>'
     + '<a href="'+PRIVACY_POLICY_URL+'" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin-top:.9rem;font-size:.85rem;font-weight:600;color:var(--pine)">Read the full Privacy Policy'+icon("right",14)+'</a>'
     + '<div class="divider"></div>'
-    + '<a href="'+PLAY_STORE_URL+'" target="_blank" rel="noopener noreferrer" style="display:flex;align-items:center;justify-content:space-between;padding:.85rem 1rem;border:1px solid var(--line);border-radius:.75rem;background:var(--field);text-decoration:none;color:inherit;margin-bottom:.75rem">'
-    + '<span><span style="font-weight:600;font-size:.9rem;display:block">Enjoying Billfold?</span>'
-    + '<span class="muted" style="font-size:.8rem">Leave a rating on the Play Store</span></span>'
+    + '<h2 class="eyebrow">Enjoying Billfold?</h2>'
+    + '<p class="muted" style="font-size:.8rem;margin-bottom:.75rem">Here are some ways you can show your support.</p>'
+    + '<a href="'+PLAY_STORE_URL+'" target="_blank" rel="noopener noreferrer" style="display:flex;align-items:center;justify-content:space-between;padding:.85rem 1rem;border:1px solid var(--line);border-radius:.75rem;background:var(--field);text-decoration:none;color:inherit;margin-bottom:.6rem">'
+    + '<span style="font-size:.875rem;font-weight:500">Leave a rating on the Play Store</span>'
     + icon("right",16) + '</a>'
     + '<div style="padding:.85rem 1rem;border:1px solid var(--line);border-radius:.75rem;background:var(--field)">'
-    + '<span style="font-weight:600;font-size:.9rem;display:block">Loving this app?</span>'
-    + '<span class="muted" style="font-size:.8rem">Support this developer — send a donation via PayPal to <b style="color:var(--ink)">@rootforus</b></span>'
+    + '<span style="font-size:.875rem;font-weight:500;display:block">Send a donation via PayPal</span>'
+    + '<span class="muted" style="font-size:.8rem">to <b style="color:var(--ink)">@rootforus</b></span>'
     + '</div>'
     + '<p class="muted" style="font-size:.75rem;margin-top:1rem">Made by SimplyRoot</p>';
 }
@@ -2659,6 +2741,8 @@ function openBillForm(id){
     return '<option value="'+(i+1)+'"'+((b&&b.month)===i+1?" selected":"")+'>'+mn+'</option>';
   }).join("");
   var isActive = b ? !!b.active : true;
+  var hasDueDay = !!(b && (b.dueDay || b.dueDay2));
+  var remindOn = b ? !b.remindOff : false;
 
   modal(b ? "Edit bill" : "Add a bill",
     '<div class="fgroup"><label class="flabel">Name</label>'
@@ -2675,11 +2759,15 @@ function openBillForm(id){
     + '<option value="semimonthly"'+(freq==="semimonthly"?" selected":"")+'>Twice a month (custom days)</option></select>'
     + '<div id="bfMonthWrap" class="'+(freq==="yearly"?"":"hidden")+'"><select id="bfMonth" class="field" style="margin-top:.5rem">'+monthOpts+'</select></div></div>'
     + '<div class="fgroup"><label id="bfDueDayLbl" class="flabel">'+(freq==="semimonthly"?"1st due day":"Due day of month (optional)")+'</label>'
-    + '<input id="bfDueDay" class="field" type="number" inputmode="numeric" min="1" max="31" value="'+(b&&b.dueDay?b.dueDay:"")+'" placeholder="e.g. 15">'
+    + '<input id="bfDueDay" class="field" type="number" inputmode="numeric" min="1" max="31" value="'+(b&&b.dueDay?b.dueDay:"")+'" placeholder="e.g. 15" oninput="bfUpdateRemindVisibility()">'
     + '<div id="bfDueDay2Wrap" class="'+(freq==="semimonthly"?"":"hidden")+'" style="margin-top:.5rem">'
     + '<label class="flabel">2nd due day</label>'
-    + '<input id="bfDueDay2" class="field" type="number" inputmode="numeric" min="1" max="31" value="'+(b&&b.dueDay2?b.dueDay2:"")+'" placeholder="e.g. 30"></div>'
+    + '<input id="bfDueDay2" class="field" type="number" inputmode="numeric" min="1" max="31" value="'+(b&&b.dueDay2?b.dueDay2:"")+'" placeholder="e.g. 30" oninput="bfUpdateRemindVisibility()"></div>'
     + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Powers Settings → Reminders. Leave blank if it varies.</p></div>'
+    + '<div id="bfRemindWrap" class="fgroup '+(hasDueDay?"":"hidden")+'"><button class="field row" style="cursor:pointer" onclick="bfRemindToggle(this)">'
+    + '<span id="bfRemindLbl" style="font-size:.875rem;font-weight:500">'+(remindOn?"Remind me before this is due":"No reminder for this bill")+'</span>'
+    + '<span id="bfRemind" class="toggle'+(remindOn?" on":"")+'" data-on="'+(remindOn?1:0)+'"><span class="knob"></span></span></button>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">You can change this anytime in Settings → Reminders.</p></div>'
     + '<div class="fgroup"><label class="flabel">Category</label>'
     + '<select id="bfCat" class="field" onchange="document.getElementById(\'bfNewCatWrap\').className=this.value===\'__new\'?\'\':\'hidden\'">'+opts+'</select>'
     + '<div id="bfNewCatWrap" class="' + (cat === "__new" ? "" : "hidden") + '"><input id="bfNewCat" class="field" style="margin-top:.5rem" placeholder="Category name"></div></div>'
@@ -2694,6 +2782,14 @@ function bfFreqChange(val){
   document.getElementById("bfMonthWrap").className = val==="yearly" ? "" : "hidden";
   document.getElementById("bfDueDay2Wrap").className = val==="semimonthly" ? "" : "hidden";
   document.getElementById("bfDueDayLbl").textContent = val==="semimonthly" ? "1st due day" : "Due day of month (optional)";
+  bfUpdateRemindVisibility();
+}
+function bfUpdateRemindVisibility(){
+  var d1 = parseInt((document.getElementById("bfDueDay")||{}).value, 10);
+  var d2 = parseInt((document.getElementById("bfDueDay2")||{}).value, 10);
+  var has = (d1>=1 && d1<=31) || (d2>=1 && d2<=31);
+  var wrap = document.getElementById("bfRemindWrap");
+  if(wrap) wrap.className = "fgroup " + (has ? "" : "hidden");
 }
 function bfToggle(btn){
   var t = document.getElementById("bfActive"), lbl = document.getElementById("bfActiveLbl");
@@ -2701,6 +2797,13 @@ function bfToggle(btn){
   t.setAttribute("data-on", on?"0":"1");
   t.className = "toggle"+(on?"":" on");
   lbl.textContent = on ? "Paused — kept, but not counted" : "Active — counts in every screen";
+}
+function bfRemindToggle(btn){
+  var t = document.getElementById("bfRemind"), lbl = document.getElementById("bfRemindLbl");
+  var on = t.getAttribute("data-on")==="1";
+  t.setAttribute("data-on", on?"0":"1");
+  t.className = "toggle"+(on?"":" on");
+  lbl.textContent = on ? "No reminder for this bill" : "Remind me before this is due";
 }
 function bfSave(){
   var name = document.getElementById("bfName").value.trim();
@@ -2714,13 +2817,15 @@ function bfSave(){
   var dueDay2Raw = freq==="semimonthly" ? parseInt(document.getElementById("bfDueDay2").value,10) : NaN;
   var dueDay2 = (dueDay2Raw>=1 && dueDay2Raw<=31) ? dueDay2Raw : null;
   var active = document.getElementById("bfActive").getAttribute("data-on")==="1";
+  var remindEl = document.getElementById("bfRemind");
+  var remindOff = remindEl ? remindEl.getAttribute("data-on")!=="1" : true;
   var err = document.getElementById("bfErr");
   function fail(m){ err.textContent=m; err.style.display="block"; }
   if(!name) return fail("Give the bill a name.");
   if(!amount) return fail("Enter an amount above zero.");
   if(!cat) return fail("Pick or type a category.");
   var bill = { id: editId || ("b"+Date.now()), name:name, amount:amount, freq:freq,
-    month: freq==="yearly"?month:undefined, dueDay:dueDay, dueDay2: freq==="semimonthly"?dueDay2:undefined, category:cat, active:active };
+    month: freq==="yearly"?month:undefined, dueDay:dueDay, dueDay2: freq==="semimonthly"?dueDay2:undefined, category:cat, active:active, remindOff:remindOff };
   var found = false;
   S.bills = S.bills.map(function(b){ if(b.id===bill.id){found=true; return bill;} return b; });
   if(!found) S.bills.push(bill);
@@ -3381,7 +3486,7 @@ function devReplayOnboarding(){
   showWelcomeModal("closeModal();startOnboarding()");
 }
 
-/* --- Setup wizard: income → available balance → card names → done. Each step is skippable;
+/* --- Setup wizard: income → available balance → savings goal → done. Each step is skippable;
    nothing here is required to use the app, it just saves a few trips to Settings later. --- */
 function startOnboarding(){ onboardStep1(); }
 function onboardStep1(){
@@ -3414,22 +3519,23 @@ function onboardSaveStep2(){
   onboardStep3();
 }
 function onboardStep3(){
-  modal("Name your cards",
-    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">Optional — rename these to match your actual credit cards, or skip and do it later from Settings → Card names & notes.</p>'
-    + S.cardNames.map(function(cn,i){
-        return '<div class="fgroup"><label class="flabel">Card '+(i+1)+'</label>'
-          + '<input id="obCard'+i+'" class="field" value="'+esc(cn)+'"></div>';
-      }).join("")
+  modal("Set a savings goal",
+    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">Optional — give it a name and a target, or skip and add one later from Settings → Savings goals.</p>'
+    + '<div class="fgroup"><label class="flabel">Goal name</label>'
+    + '<input id="obGoalName" class="field" placeholder="e.g. Emergency fund"></div>'
+    + '<div class="fgroup"><label class="flabel">Target amount</label>'
+    + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
+    + '<input id="obGoalTarget" class="tnum" inputmode="decimal" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
     + '<button class="btn btn-pine" style="width:100%;margin-top:1.25rem;padding:.8rem" onclick="onboardSaveStep3()">Continue</button>'
     + '<button class="btn btn-ghost" style="width:100%;margin-top:.5rem" onclick="onboardStep4()">Skip for now</button>');
 }
 function onboardSaveStep3(){
-  S.cardNames = S.cardNames.map(function(cn,i){
-    var el = document.getElementById("obCard"+i);
-    var v = el ? el.value.trim() : "";
-    return v || cn;
-  });
-  persist();
+  var name = (document.getElementById("obGoalName").value||"").trim();
+  var target = num(document.getElementById("obGoalTarget").value);
+  if(name && target && S.savingsGoals.length<5){
+    S.savingsGoals.push({ id:"g"+Date.now(), name:name, target:target });
+    persist();
+  }
   onboardStep4();
 }
 function onboardStep4(){
