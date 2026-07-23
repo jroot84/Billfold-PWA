@@ -448,7 +448,7 @@ var storageOK = true;
 function loadState(){
   try{
     var raw = localStorage.getItem(KEY);
-    if(raw){ var d = JSON.parse(raw); if(d && d.bills) return d; }
+    if(raw){ var d = JSON.parse(raw); if(d && (d.expenses || d.bills)) return d; }
   }catch(e){ storageOK = false; }
   return null;
 }
@@ -2731,7 +2731,8 @@ var UPDATE_LOG = [
       "Added \"Load sample data\" to Developer options for trying the app out, and a discreet way to unlock Developer options on the web preview.",
       "Modals auto-focus their first field on desktop/web, so you can start typing or tab through without an extra click.",
       "Fixed a rounding bug: repeated automatic balance adjustments could drift a few fractions of a cent past 2 decimal places over time. Every amount is now snapped to the nearest cent the moment it's entered or calculated, so this can't recur — and reopening an existing entry now displays a clean number even if it was affected before.",
-      "Fixed a real bug: restoring a backup made before Bills and Funds were merged into Expenses silently failed to convert them, so bills didn't come back. Restore now converts an old-format backup the same way opening one on a device that had already updated would, and also accepts backups made after the merge, which it had been rejecting outright."
+      "Fixed a real bug: restoring a backup made before Bills and Funds were merged into Expenses silently failed to convert them, so bills didn't come back. Restore now converts an old-format backup the same way opening one on a device that had already updated would, and also accepts backups made after the merge, which it had been rejecting outright.",
+      "Fixed a more serious version of the same bug: on the web app, any save made after the Bills/Funds merge appeared to save successfully, but was silently rejected as \"not real data\" the next time the app opened, since the check for a real save was still looking for the old bills field specifically. Data wasn't actually being deleted, but it looked that way after every reload. The check now recognizes both the old and new save shape."
     ]
   },
   {
