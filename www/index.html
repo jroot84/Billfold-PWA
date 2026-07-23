@@ -2730,7 +2730,8 @@ var UPDATE_LOG = [
       "A reached savings goal now says so plainly (\"Goal reached! \ud83c\udf89\") instead of just showing 100% with $0 left to go.",
       "Added \"Load sample data\" to Developer options for trying the app out, and a discreet way to unlock Developer options on the web preview.",
       "Modals auto-focus their first field on desktop/web, so you can start typing or tab through without an extra click.",
-      "Fixed a rounding bug: repeated automatic balance adjustments could drift a few fractions of a cent past 2 decimal places over time. Every amount is now snapped to the nearest cent the moment it's entered or calculated, so this can't recur — and reopening an existing entry now displays a clean number even if it was affected before."
+      "Fixed a rounding bug: repeated automatic balance adjustments could drift a few fractions of a cent past 2 decimal places over time. Every amount is now snapped to the nearest cent the moment it's entered or calculated, so this can't recur — and reopening an existing entry now displays a clean number even if it was affected before.",
+      "Fixed a real bug: restoring a backup made before Bills and Funds were merged into Expenses silently failed to convert them, so bills didn't come back. Restore now converts an old-format backup the same way opening one on a device that had already updated would, and also accepts backups made after the merge, which it had been rejecting outright."
     ]
   },
   {
@@ -3564,16 +3565,22 @@ function openImport(){
 function imApply(raw){
   try{
     var data = JSON.parse(raw);
-    if(!data || Object.prototype.toString.call(data.bills)!=="[object Array]") throw new Error("shape");
+    var looksOld = data && Object.prototype.toString.call(data.bills)==="[object Array]";
+    var looksNew = data && Object.prototype.toString.call(data.expenses)==="[object Array]";
+    if(!data || !(looksOld || looksNew)) throw new Error("shape");
     if((data.lastSaved || 0) < (S.lastSaved || 0)){
       if(!window.confirm("This backup is OLDER than the data already on this device. Replace anyway?")) return;
     }
     var base = seedState();
+    delete base.expenses; // seedState()'s placeholder [] would otherwise block migrateExpenses() below from converting an old backup's bills/funds
     Object.keys(data).forEach(function(k){ base[k] = data[k]; });
     S = base;
     activeSavingsGoalId = null;
     savingsFilterGoal = null;
     migrateSavingsGoals();
+    migrateOneTimeExpenses();
+    migrateExpenses();
+    migrateJournalEntries();
     persist(); closeModal(); render();
   }catch(e){
     var el = document.getElementById("imErr");
