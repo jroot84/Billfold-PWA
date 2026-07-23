@@ -362,6 +362,76 @@ function seedState(){
     devOptionsRevealed:false
   };
 }
+/* ---------- sample data (dev-only "Load sample data") ----------
+   A populated, plausible-looking dataset covering every feature at once — bills (including
+   one linked to a savings goal), funds, spending entries (fund-linked and Unplanned), and
+   savings goals with history. Meant to bypass onboarding entirely, not simulate it. */
+function sampleState(){
+  var now = new Date();
+  var y = now.getFullYear(), m = now.getMonth()+1;
+  function pad(n){ return ("0"+n).slice(-2); }
+  function d(day){ return y+"-"+pad(m)+"-"+pad(day); }
+  var k = mk(y,m);
+  var travelGoalId = "g_sample_travel";
+  var emergencyGoalId = "g_sample_emergency";
+  var months = {};
+  months[k] = { balance:2500, cards:[75,0,0], left:{} };
+
+  return {
+    version:1,
+    income:4200,
+    cardNames:["Car repair","Expense 2","Expense 3"],
+    categories:["Housing","Subscriptions","Insurance","Groceries","Gas","Unplanned"],
+    bills:[
+      { id:"b_sample_rent", name:"Rent", amount:1200, freq:"monthly", dueDay:1, category:"Housing", active:true, remindOff:false },
+      { id:"b_sample_netflix", name:"Netflix", amount:15.49, freq:"monthly", dueDay:5, category:"Subscriptions", active:true, remindOff:true },
+      { id:"b_sample_insurance", name:"Car insurance", amount:89, freq:"monthly", dueDay:12, category:"Insurance", active:true, remindOff:true },
+      { id:"b_sample_travel", name:"Travel fund transfer", amount:150, freq:"monthly", dueDay:3, category:"→ Travel fund", active:true, remindOff:true, linkedGoalId:travelGoalId }
+    ],
+    funds:[
+      { id:"f_sample_groceries", name:"Groceries", category:"Groceries", budget:400, active:true },
+      { id:"f_sample_gas", name:"Gas", category:"Gas", budget:150, active:true }
+    ],
+    months: months,
+    journal:[
+      { id:"j_sample_1", name:"Walmart", amount:150, date:d(5), category:"Groceries", applyTo:"fund", fundLink:{fundId:"f_sample_groceries"}, billLink:null },
+      { id:"j_sample_2", name:"Shell", amount:45, date:d(7), category:"Gas", applyTo:"fund", fundLink:{fundId:"f_sample_gas"}, billLink:null },
+      { id:"j_sample_3", name:"Coffee with a friend", amount:12, date:d(10), category:"Unplanned", applyTo:"none", fundLink:null, billLink:null },
+      { id:"j_sample_4", name:"Movie night", amount:30, date:d(14), category:"Unplanned", applyTo:"none", fundLink:null, billLink:null }
+    ],
+    savingsGoals:[
+      { id:emergencyGoalId, name:"Emergency fund", target:5000 },
+      { id:travelGoalId, name:"Travel fund", target:2000 }
+    ],
+    savingsEntries:[
+      { id:"s_sample_1", date:d(2), note:"", type:"deposit", amount:500, goalId:emergencyGoalId },
+      { id:"s_sample_2", date:d(16), note:"", type:"deposit", amount:250, goalId:emergencyGoalId },
+      { id:"s_sample_3", date:d(3), note:"", type:"deposit", amount:100, goalId:travelGoalId }
+    ],
+    remindersOn:false,
+    remindDays:3,
+    devOptionsRevealed:true,
+    migratedOneTime:true
+  };
+}
+var sampleDataArmed = false;
+function loadSampleData(){
+  if(!sampleDataArmed){
+    sampleDataArmed = true;
+    var btn = document.getElementById("sampleDataBtn");
+    if(btn){ btn.textContent = "Tap again — replaces everything with sample data"; btn.className = "btn btn-danger armed"; }
+    return;
+  }
+  sampleDataArmed = false;
+  S = sampleState();
+  persist();
+  var now = new Date();
+  view.y = now.getFullYear(); view.m = now.getMonth()+1;
+  settingsSubScreen = null;
+  view.screen = "month";
+  window.scrollTo(0,0);
+  render();
+}
 
 /* ---------- storage: this device, this browser ---------- */
 var storageOK = true;
@@ -2747,6 +2817,13 @@ function settingsDetailScreen(key){
    are just display labels; nothing else in the app reads them. */
 var UPDATE_LOG = [
   {
+    version: "1.8",
+    date: "July 2026",
+    notes: [
+      "Added \"Load sample data\" to Developer options — erases everything and fills the app with example bills (including a goal-linked one), funds, spending entries, and savings goals, skipping the welcome message and setup wizard entirely. Dev-only, since it's meant for trying the app out or testing, not everyday use."
+    ]
+  },
+  {
     version: "1.7",
     date: "July 2026",
     notes: [
@@ -3995,6 +4072,10 @@ function devDetailCard(){
     + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.5rem">Onboarding</h3>'
     + '<button class="btn btn-ghost" style="width:100%" onclick="devReplayOnboarding()">Replay welcome &amp; setup wizard</button>'
     + '<p class="muted" style="font-size:.72rem;margin-top:.5rem">Runs the real first-launch flow on top of your current data — anything you enter overwrites what\'s already there, same as if you\'d used the fields normally.</p>'
+    + '<div class="divider"></div>'
+    + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.5rem">Sample data</h3>'
+    + '<button id="sampleDataBtn" class="btn btn-danger" style="width:100%" onclick="loadSampleData()">Load sample data</button>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.5rem">Erases everything on this device and fills it with example bills, funds, a goal-linked bill, savings goals, and spending — skips the welcome message and setup wizard entirely, so you land straight on Month with something to look at. There\'s no undo.</p>'
     + '<div class="divider"></div>'
     + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.5rem">Scheduled reminders</h3>'
     + '<button class="btn btn-ghost" style="width:100%;margin-bottom:.5rem" onclick="devRefreshPending()">Refresh list</button>'
