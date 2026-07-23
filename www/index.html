@@ -2806,6 +2806,19 @@ function modal(title, inner){
     + '<div class="sheet"><div class="sheet-head"><h2>'+title+'</h2>'
     + '<button aria-label="Close" style="color:var(--sub);padding:.3rem" onclick="closeModal()">'+icon("x",20)+'</button></div>'
     + inner + '</div></div>';
+  focusFirstField();
+}
+/* Auto-focus the first real field so a mouse/keyboard user can start typing or tabbing right
+   away. Scoped to pointer-fine devices (mouse/trackpad) — on a touch device this would pop
+   the on-screen keyboard the instant a modal opens, which is more disruptive than helpful. */
+function focusFirstField(){
+  try{
+    if(!(window.matchMedia && window.matchMedia("(pointer: fine)").matches)) return;
+    var sheet = document.querySelector(".sheet");
+    if(!sheet) return;
+    var field = sheet.querySelector('input:not([type="hidden"]):not([disabled]), textarea:not([disabled]), select:not([disabled])');
+    if(field){ field.focus(); if(field.select && field.tagName!=="SELECT") field.select(); }
+  }catch(e){ /* best effort — never let this break modal opening */ }
 }
 function closeModal(){
   document.getElementById("modalRoot").innerHTML="";
