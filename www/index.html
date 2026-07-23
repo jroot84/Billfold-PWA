@@ -343,7 +343,7 @@ function catColor(cat){
 }
 function isSkipped(b, y, m){ return !!(b.skipMonths && b.skipMonths.indexOf(mk(y,m))>=0); }
 
-/* ---------- seed data (from the original spreadsheet) ---------- */
+/* ---------- seed data (fresh install / Start Over) ---------- */
 function seedState(){
   // Fresh install starts completely empty.
   return {
@@ -402,9 +402,6 @@ var trackMode = "journal";
 var billsSubMode = "bills";
 var calcSubMode = "basic", reportSubMode = "bills";
 var jEditId = null, jConfirmDel = false, sEditId = null, sConfirmDel = false;
-/* Which "Applies to" panel is active in the Add/Edit spending entry form — none | bill | fund.
-   Transient UI state for the open modal only, not persisted. */
-var jfApplyTo = "none";
 /* Spending screen's search/sort/filter toolbar state — transient UI state, not saved with app data. */
 var journalSearchOpen = false, journalSearchQuery = "";
 var journalSort = "date_desc"; // date_desc | date_asc | amount_desc | cat_asc
@@ -478,6 +475,10 @@ function restOfYear(){
       if(isSkipped(b, view.y, m)) return;
       sum += leftOf(b,data,1);
       if(b.freq==="semimonthly") sum += leftOf(b,data,2);
+    });
+    S.funds.forEach(function(f){
+      if(!f.active) return;
+      sum += Math.max(0, num(f.budget) - fundSpentInMonth(f, view.y, m));
     });
   }
   return sum;
@@ -555,7 +556,11 @@ function monthScreen(){
     }
   });
   var cardsTotal = (data.cards||[]).reduce(function(s,c){return s+num(c);},0);
-  var afterAll = num(data.balance) - cardsTotal - stillDue;
+  var activeFunds = S.funds.filter(function(f){ return f.active; });
+  var fundsLeft = activeFunds.reduce(function(s,f){
+    return s + Math.max(0, num(f.budget) - fundSpentInMonth(f, view.y, view.m));
+  }, 0);
+  var afterAll = num(data.balance) - cardsTotal - stillDue - fundsLeft;
   var pct = totalDue>0 ? Math.round((totalDue-stillDue)/totalDue*100) : 100;
   var roy = restOfYear();
 
@@ -577,8 +582,10 @@ function monthScreen(){
     + '<div class="divider"></div>'
     + '<div class="row"><span class="lbl">Still due this month</span>'
     + '<span class="tnum" style="font-weight:700;color:'+(stillDue>0?"var(--amber)":"var(--pine)")+'">'+usd(stillDue)+'</span></div>'
+    + (activeFunds.length ? '<div class="row" style="margin-top:.4rem"><span class="lbl">Funds not yet spent</span>'
+        + '<span class="tnum" style="font-weight:700;color:'+(fundsLeft>0?"var(--amber)":"var(--pine)")+'">'+usd(fundsLeft)+'</span></div>' : '')
     + '<div class="hero" style="background:'+(afterAll>=0?"var(--pine-soft)":"var(--amber-soft)")+'">'
-    + '<span style="font-weight:600;font-size:.9rem">After bills + one-time expenses</span>'
+    + '<span style="font-weight:600;font-size:.9rem">After bills, funds &amp; one-time expenses</span>'
     + '<span class="amt tnum" style="color:'+(afterAll>=0?"var(--pine)":"var(--red)")+'">'+usd(afterAll)+'</span></div>'
     + '<div class="row" style="margin-top:.6rem"><span class="muted" style="font-size:.75rem">Rest of '+view.y+' — left to fund</span>'
     + '<span class="tnum muted" style="font-size:.75rem;font-weight:600">'+usd(roy)+'</span></div>'
@@ -961,7 +968,7 @@ function fundsSection(){
   var leftTotal = budgetTotal - spentTotal;
 
   var h = '<section class="card pad"><h2 class="eyebrow">Funds — '+MS[view.m-1]+' '+view.y+'</h2>'
-    + '<p class="muted" style="font-size:.85rem;margin-bottom:.75rem">Budgeted amounts for spending that varies month to month — groceries, gas, and the like. When logging spending, set "Applies to" → Fund and pick this one, and it counts here automatically.</p>';
+    + '<p class="muted" style="font-size:.85rem;margin-bottom:.75rem">Budgeted amounts for spending that varies month to month — groceries, gas, and the like. When logging spending, choose this fund from the Category list, and it counts here automatically.</p>';
   if(S.funds.length===0){
     h += '<p class="muted" style="font-size:.9rem">No funds yet. Tap “+ Add fund” to set your first budget.</p>'
       + '</section>';
@@ -1046,7 +1053,7 @@ function openFundForm(id){
     + '<div class="fgroup"><label class="flabel">Category</label>'
     + '<select id="fdCat" class="field" onchange="document.getElementById(\'fdNewCatWrap\').className=this.value===\'__new\'?\'\':\'hidden\'">'+opts+'</select>'
     + '<div id="fdNewCatWrap" class="'+(cat==="__new"?"":"hidden")+'"><input id="fdNewCat" class="field" style="margin-top:.5rem" placeholder="Category name"></div>'
-    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">When logging spending, choose "Applies to" → Fund and pick '+(f?esc(f.name):"this fund")+', and it\'ll count against this budget automatically.</p></div>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">When logging spending, choose '+(f?esc(f.name):"this fund")+' from the Category list, and it\'ll count against this budget automatically.</p></div>'
     + '<div class="fgroup"><button class="field row" style="cursor:pointer" onclick="fdToggle(this)">'
     + '<span id="fdActiveLbl" style="font-size:.875rem;font-weight:500">'+(isActive?"Active — counts in totals":"Paused — kept, but not counted")+'</span>'
     + '<span id="fdActive" class="toggle'+(isActive?" on":"")+'" data-on="'+(isActive?1:0)+'"><span class="knob"></span></span></button></div>'
@@ -1154,7 +1161,7 @@ function reportsSection(){
       + '<button style="'+pStyle+'" class="'+(reportScope==="year"?"on":"")+'" onclick="reportScope=\'year\';render()">'+view.y+'</button>'
       + '</div>';
   }
-  // Adding goals now lives in Settings → Savings goals (and the setup wizard). Reports still
+  // Adding goals now lives in Settings → Income & savings goals (and the setup wizard). Reports still
   // lets you tap a goal card to edit it, and still nudges toward Settings if none exist yet.
   var row = '<div class="row" style="flex-wrap:wrap;row-gap:.5rem;margin-bottom:1rem">' + subSeg + scopeSeg + '</div>';
   if(reportSubMode==="spending") return row + spendingReportBody();
@@ -1663,24 +1670,70 @@ function revertJournalFromBill(entry){
   var full = num(bill.amount);
   setBillLeftAt(entry.billLink.y, entry.billLink.m, entry.billLink.billId, Math.min(full, cur + num(entry.amount)));
 }
-function journalDueBillOptions(dateStr, selectedId){
+/* Optional convenience for "Unplanned" spending entries: reduce that month's Available-now
+   balance by the same amount, so a one-off expense doesn't need a second manual edit. */
+function applyBalanceAdjust(entry){
+  if(!entry.balanceAdjust) return;
+  var k = mk(entry.balanceAdjust.y, entry.balanceAdjust.m);
+  if(!S.months[k]) S.months[k] = emptyMonth();
+  S.months[k].balance = num(S.months[k].balance) - num(entry.balanceAdjust.amount);
+}
+function revertBalanceAdjust(entry){
+  if(!entry.balanceAdjust) return;
+  var k = mk(entry.balanceAdjust.y, entry.balanceAdjust.m);
+  if(!S.months[k]) S.months[k] = emptyMonth();
+  S.months[k].balance = num(S.months[k].balance) + num(entry.balanceAdjust.amount);
+}
+function journalCatOptions(dateStr, selectedValue, legacyCat){
+  // Spending entries can only tie to something you've actually planned for — a Bill, a Fund,
+  // or the explicit "Unplanned" catch-all. No free-text categories here: that's what let
+  // people quietly route around a fund's budget limit by typing a new/matching category
+  // instead of picking the fund itself. New categories are still created normally, just from
+  // the Bill or Fund form, where they represent a real plan rather than a loophole.
+  var opts = '<option value="Unplanned"'+(selectedValue==="Unplanned"?" selected":"")+'>Unplanned</option>';
+
+  if(S.funds.length){
+    opts += '<optgroup label="Funds">' + S.funds.map(function(f){
+      var val = "__fund__"+f.id;
+      return '<option value="'+esc(val)+'"'+(val===selectedValue?" selected":"")+'>→ '+esc(f.name)+' ('+esc(f.category)+')</option>';
+    }).join("") + '</optgroup>';
+  }
+
   var d = new Date(dateStr+"T00:00:00");
-  if(isNaN(d)) return '<option value="">— None —</option>';
-  var y=d.getFullYear(), m=d.getMonth()+1;
-  var due = S.bills.filter(function(b){ return dueInMonth(b,m); });
-  var opts = '<option value=""'+(selectedId?"":" selected")+'>— None —</option>';
-  due.forEach(function(b){
-    var left = billLeftAt(y,m,b.id);
-    opts += '<option value="'+b.id+'"'+(b.id===selectedId?" selected":"")+'>'+esc(b.name)+' ('+esc(usd(left))+' left)</option>';
-  });
-  if(due.length===0) opts += '<option value="" disabled>No bills due that month</option>';
+  if(!isNaN(d)){
+    var y=d.getFullYear(), m=d.getMonth()+1;
+    // Goal-linked bills are paid through their own flow (mark paid → auto deposit), so they're
+    // excluded here to avoid a spending entry and a goal deposit both claiming the same bill.
+    var due = S.bills.filter(function(b){ return dueInMonth(b,m) && !isSkipped(b,y,m) && !b.linkedGoalId; });
+    if(due.length){
+      opts += '<optgroup label="Bills due this month">' + due.map(function(b){
+        var val = "__bill__"+b.id;
+        var left = billLeftAt(y,m,b.id);
+        return '<option value="'+esc(val)+'"'+(val===selectedValue?" selected":"")+'>→ '+esc(b.name)+' ('+esc(usd(left))+' left)</option>';
+      }).join("") + '</optgroup>';
+    }
+  }
+
+  // Entries logged before this rule existed may carry a free-text category that isn't Unplanned
+  // and isn't tied to a Bill or Fund. Keep that one option available so editing an old entry
+  // doesn't force a recategorization, without offering it (or free text) for anything new.
+  if(legacyCat && legacyCat!=="Unplanned"){
+    opts += '<optgroup label="From before this rule">'
+      + '<option value="'+esc(legacyCat)+'" selected>'+esc(legacyCat)+' (existing)</option>'
+      + '</optgroup>';
+  }
   return opts;
 }
-function jfRefreshBillOptions(){
+function jfRefreshCatOptions(){
   var dateInp = document.getElementById("jfDate");
-  var sel = document.getElementById("jfBill");
+  var sel = document.getElementById("jfCat");
   if(!dateInp || !sel) return;
-  sel.innerHTML = journalDueBillOptions(dateInp.value, sel.value);
+  var current = sel.value;
+  var isRecognized = current==="Unplanned" || current.indexOf("__fund__")===0 || current.indexOf("__bill__")===0;
+  sel.innerHTML = journalCatOptions(dateInp.value, current, isRecognized ? null : current);
+  jfCatChange(sel.value); // re-derive fund/bill/balance note + new-category visibility for whatever's still selected
+  var balNote = document.getElementById("jfBalanceNote");
+  if(balNote) balNote.textContent = "Reduces Available now for "+jfBalanceMonthLabel(dateInp.value)+" by this amount, so there's no separate edit to remember. Turn this off if you'd rather update the balance yourself.";
 }
 
 /* --- journal list --- */
@@ -1790,19 +1843,19 @@ function journalSortEntries(list){
   return sorted;
 }
 function journalEntryRow(e){
-  var linkTag = "";
+  var lineText = esc(e.category);
   if(e.billLink){
     var b = S.bills.filter(function(x){ return x.id===e.billLink.billId; })[0];
-    if(b) linkTag = '<div style="font-size:.72rem;color:var(--pine);margin-top:.1rem">→ applied to '+esc(b.name)+'</div>';
+    if(b) lineText = '→ '+esc(b.name)+' (bill)';
   } else if(e.fundLink){
     var f = S.funds.filter(function(x){ return x.id===e.fundLink.fundId; })[0];
-    if(f) linkTag = '<div style="font-size:.72rem;color:var(--pine);margin-top:.1rem">→ counts toward '+esc(f.name)+'</div>';
+    if(f) lineText = '→ '+esc(f.name)+' (fund)';
   }
   return '<li><button class="bill-li" style="width:100%;text-align:left" onclick="openJournalForm(\''+e.id+'\')">'
     + '<div style="flex:1"><div class="bill-name">'+esc(e.name)+'</div>'
-    + '<div class="bill-cat"><span class="cat-dot" style="background:'+catColor(e.category)+'"></span>'+esc(e.category)
+    + '<div class="bill-cat"><span class="cat-dot" style="background:'+catColor(e.category)+'"></span>'+lineText
     + (journalSort!=="date_desc" ? ' · '+esc(fmtDateLabel(e.date)) : "") + '</div>'
-    + linkTag + '</div>'
+    + '</div>'
     + '<span class="tnum" style="font-weight:700;font-size:.9rem">'+usd(e.amount)+'</span>'
     + '</button></li>';
 }
@@ -1873,47 +1926,72 @@ function journalScreen(){
   }
   return h;
 }
-function journalFundOptions(selectedId){
-  if(S.funds.length===0) return '<option value="" disabled selected>No funds yet — add one from Bills → Funds</option>';
-  var opts = '<option value=""'+(selectedId?"":" selected")+'>— Choose a fund —</option>';
-  S.funds.forEach(function(f){
-    opts += '<option value="'+f.id+'"'+(f.id===selectedId?" selected":"")+'>'+esc(f.name)+' ('+esc(f.category)+')</option>';
-  });
-  return opts;
-}
-function jfSetApplyTo(v){
-  jfApplyTo = v;
-  ["None","Bill","Fund"].forEach(function(k){
-    var btn = document.getElementById("jfSeg"+k);
-    if(btn) btn.className = (k.toLowerCase()===v ? "on" : "");
-  });
-  var billWrap = document.getElementById("jfBillWrap"), fundWrap = document.getElementById("jfFundWrap");
-  if(billWrap) billWrap.className = v==="bill" ? "" : "hidden";
-  if(fundWrap) fundWrap.className = v==="fund" ? "" : "hidden";
-  if(v==="fund") jfFundCatSync();
-}
-function jfFundCatSync(){
-  var fundSel = document.getElementById("jfFund"), catSel = document.getElementById("jfCat");
-  if(!fundSel || !catSel) return;
-  var f = S.funds.filter(function(x){ return x.id===fundSel.value; })[0];
-  if(f){
-    catSel.value = f.category;
-    var wrap = document.getElementById("jfNewCatWrap");
-    if(wrap) wrap.className = "hidden";
+function jfCatChange(val){
+  var isFund = val.indexOf("__fund__")===0;
+  var isBill = val.indexOf("__bill__")===0;
+  var fundNote = document.getElementById("jfFundNote");
+  if(fundNote){
+    fundNote.className = "muted" + (isFund ? "" : " hidden");
+    if(isFund){
+      var fund = S.funds.filter(function(x){ return x.id===val.slice(8); })[0];
+      var dateInp = document.getElementById("jfDate");
+      var d = dateInp ? new Date(dateInp.value+"T00:00:00") : new Date();
+      if(fund && !isNaN(d)){
+        var y = d.getFullYear(), m = d.getMonth()+1;
+        var spentSoFar = fundSpentInMonth(fund, y, m);
+        if(jEditId){
+          var orig = S.journal.filter(function(x){ return x.id===jEditId; })[0];
+          if(orig && orig.fundLink && orig.fundLink.fundId===fund.id){
+            var origD = new Date(orig.date+"T00:00:00");
+            if(!isNaN(origD) && origD.getFullYear()===y && (origD.getMonth()+1)===m) spentSoFar -= num(orig.amount);
+          }
+        }
+        var remaining = num(fund.budget) - spentSoFar;
+        fundNote.textContent = usd(Math.max(0,remaining))+" left in this fund this month. Counts toward its monthly budget automatically.";
+      }
+    }
   }
+  var billNote = document.getElementById("jfBillNote");
+  if(billNote) billNote.className = "muted" + (isBill ? "" : " hidden");
+  var balanceWrap = document.getElementById("jfBalanceWrap");
+  if(balanceWrap) balanceWrap.className = "fgroup" + ((val==="Unplanned" || isFund) ? "" : " hidden");
+}
+function jfSuggestUnplanned(){
+  var sel = document.getElementById("jfCat");
+  if(!sel) return;
+  sel.value = "Unplanned";
+  jfCatChange("Unplanned");
+  var err = document.getElementById("jfErr");
+  if(err) err.style.display = "none";
+}
+function jfBalanceMonthLabel(dateStr){
+  var d = new Date(dateStr+"T00:00:00");
+  if(isNaN(d)) return "this month";
+  return MS[d.getMonth()]+" "+d.getFullYear();
+}
+function jfBalanceToggle(btn){
+  var t = document.getElementById("jfBalanceAdjust"), lbl = document.getElementById("jfBalanceLbl");
+  var on = t.getAttribute("data-on")==="1";
+  t.setAttribute("data-on", on?"0":"1");
+  t.className = "toggle"+(on?"":" on");
+  lbl.textContent = on ? "Not subtracted from Available now" : "Also subtract this from Available now";
 }
 function openJournalForm(id){
   jEditId = id; jConfirmDel = false;
   var e = id ? S.journal.filter(function(x){ return x.id===id; })[0] : null;
   var today = new Date().toISOString().slice(0,10);
   var date = e ? e.date : today;
-  var cat = e ? e.category : (S.categories[0] || "__new");
-  var opts = S.categories.map(function(c){
-    return '<option value="'+esc(c)+'"'+(c===cat?" selected":"")+'>'+esc(c)+'</option>';
-  }).join("") + '<option value="__new">+ New category…</option>';
-  var linkedBillId = e && e.billLink ? e.billLink.billId : "";
   var linkedFundId = e && e.fundLink ? e.fundLink.fundId : "";
-  jfApplyTo = e ? (e.applyTo || (e.billLink ? "bill" : (e.fundLink ? "fund" : "none"))) : "none";
+  var linkedBillId = e && e.billLink ? e.billLink.billId : "";
+  var plainCat = e ? e.category : "Unplanned";
+  var isLegacyCat = !!(e && !linkedFundId && !linkedBillId && plainCat!=="Unplanned");
+  var catSelValue = linkedFundId ? ("__fund__"+linkedFundId) : (linkedBillId ? ("__bill__"+linkedBillId) : plainCat);
+  var isFundCat = !!linkedFundId;
+  var isBillCat = !!linkedBillId;
+  var isUnplanned = catSelValue==="Unplanned";
+  var opts = journalCatOptions(date, catSelValue, isLegacyCat ? plainCat : null);
+  var balanceAdjustOn = e ? !!e.balanceAdjust : true;
+  var balLabel = jfBalanceMonthLabel(date);
 
   modal(e ? "Edit entry" : "Add spending entry",
     '<div class="fgroup"><label class="flabel">What was it?</label>'
@@ -1922,56 +2000,78 @@ function openJournalForm(id){
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
     + '<input id="jfAmount" class="tnum" inputmode="decimal" value="'+(e?e.amount:"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
     + '<div class="fgroup"><label class="flabel">Date</label>'
-    + '<input id="jfDate" type="date" class="field" value="'+esc(date)+'" onchange="jfRefreshBillOptions()"></div>'
+    + '<input id="jfDate" type="date" class="field" value="'+esc(date)+'" onchange="jfRefreshCatOptions()"></div>'
     + '<div class="fgroup"><label class="flabel">Category</label>'
-    + '<select id="jfCat" class="field" onchange="document.getElementById(\'jfNewCatWrap\').className=this.value===\'__new\'?\'\':\'hidden\'">'+opts+'</select>'
-    + '<div id="jfNewCatWrap" class="'+(cat==="__new"?"":"hidden")+'"><input id="jfNewCat" class="field" style="margin-top:.5rem" placeholder="Category name"></div></div>'
-    + '<div class="fgroup"><label class="flabel">Applies to</label>'
-    + '<div class="seg" style="width:100%">'
-    + '<button id="jfSegNone" style="flex:1" class="'+(jfApplyTo==="none"?"on":"")+'" onclick="jfSetApplyTo(\'none\')">None</button>'
-    + '<button id="jfSegBill" style="flex:1" class="'+(jfApplyTo==="bill"?"on":"")+'" onclick="jfSetApplyTo(\'bill\')">Bill</button>'
-    + '<button id="jfSegFund" style="flex:1" class="'+(jfApplyTo==="fund"?"on":"")+'" onclick="jfSetApplyTo(\'fund\')">Fund</button>'
+    + '<select id="jfCat" class="field" onchange="jfCatChange(this.value)">'+opts+'</select>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Every entry ties to a Bill, a Fund, or gets marked Unplanned — new categories are created from the Bill or Fund form, not here.</p>'
+    + '<p id="jfFundNote" class="muted'+(isFundCat?"":" hidden")+'" style="font-size:.72rem;margin-top:.35rem">Counts toward that fund\'s monthly budget — its spending category is applied automatically.</p>'
+    + '<p id="jfBillNote" class="muted'+(isBillCat?"":" hidden")+'" style="font-size:.72rem;margin-top:.35rem">Reduces how much is left to pay on that bill this month, and applies its category automatically.</p>'
     + '</div>'
-    + '<div id="jfBillWrap" class="'+(jfApplyTo==="bill"?"":"hidden")+'" style="margin-top:.75rem">'
-    + '<select id="jfBill" class="field">'+journalDueBillOptions(date, linkedBillId)+'</select>'
-    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Reduces how much is left to pay on that bill this month — handy for things like Groceries or Gas.</p>'
-    + '</div>'
-    + '<div id="jfFundWrap" class="'+(jfApplyTo==="fund"?"":"hidden")+'" style="margin-top:.75rem">'
-    + '<select id="jfFund" class="field" onchange="jfFundCatSync()">'+journalFundOptions(linkedFundId)+'</select>'
-    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Counts toward that fund\'s monthly budget. Its category is applied above automatically.</p>'
-    + '</div>'
+    + '<div id="jfBalanceWrap" class="fgroup'+((isUnplanned||isFundCat)?"":" hidden")+'"><button class="field row" style="cursor:pointer" onclick="jfBalanceToggle(this)">'
+    + '<span id="jfBalanceLbl" style="font-size:.875rem;font-weight:500">'+(balanceAdjustOn?"Also subtract this from Available now":"Not subtracted from Available now")+'</span>'
+    + '<span id="jfBalanceAdjust" class="toggle'+(balanceAdjustOn?" on":"")+'" data-on="'+(balanceAdjustOn?1:0)+'"><span class="knob"></span></span></button>'
+    + '<p id="jfBalanceNote" class="muted" style="font-size:.72rem;margin-top:.35rem">Reduces Available now for '+balLabel+' by this amount, so there\'s no separate edit to remember. Turn this off if you\'d rather update the balance yourself.</p>'
     + '</div>'
     + '<p id="jfErr" class="msg-err" style="display:none"></p>'
     + '<button class="btn btn-pine" style="width:100%;margin-top:1rem;padding:.8rem" onclick="jfSave()">'+(e?"Save changes":"Add entry")+'</button>'
     + (e ? '<button id="jfDel" class="btn btn-danger" style="width:100%;margin-top:.5rem" onclick="jfDelete()">Delete this entry</button>' : ''));
-  if(jfApplyTo==="fund") jfFundCatSync();
+  if(isFundCat) jfCatChange(catSelValue);
 }
 function jfSave(){
   var name = document.getElementById("jfName").value.trim();
   var amount = num(document.getElementById("jfAmount").value);
   var date = document.getElementById("jfDate").value;
   var catSel = document.getElementById("jfCat").value;
-  var cat = catSel==="__new" ? document.getElementById("jfNewCat").value.trim() : catSel;
-  var applyTo = jfApplyTo || "none";
-  var billId = applyTo==="bill" ? document.getElementById("jfBill").value : "";
-  var fundId = applyTo==="fund" ? document.getElementById("jfFund").value : "";
+  var isFundCat = catSel.indexOf("__fund__")===0;
+  var isBillCat = catSel.indexOf("__bill__")===0;
+  var fundId = isFundCat ? catSel.slice(8) : "";
+  var fund = isFundCat ? S.funds.filter(function(x){ return x.id===fundId; })[0] : null;
+  var billId = isBillCat ? catSel.slice(8) : "";
+  var bill = isBillCat ? S.bills.filter(function(x){ return x.id===billId; })[0] : null;
+  var cat = isFundCat ? (fund?fund.category:"") : (isBillCat ? (bill?bill.category:"") : catSel);
+  var applyTo = isFundCat ? "fund" : (isBillCat ? "bill" : "none");
   var err = document.getElementById("jfErr");
-  function fail(m){ err.textContent=m; err.style.display="block"; }
+  function fail(m){ err.innerHTML=m; err.style.display="block"; }
   if(!name) return fail("Give it a short name.");
   if(!amount) return fail("Enter an amount above zero.");
   if(!date) return fail("Pick a date.");
   if(!cat) return fail("Pick or type a category.");
-  if(applyTo==="bill" && !billId) return fail("Pick a bill, or switch Applies to → None.");
-  if(applyTo==="fund" && !fundId) return fail("Pick a fund, or switch Applies to → None.");
+  if(applyTo==="bill" && !bill) return fail("That bill no longer exists — pick a different category.");
+  if(applyTo==="fund" && !fund) return fail("That fund no longer exists — pick a different category.");
 
   var prev = jEditId ? S.journal.filter(function(x){ return x.id===jEditId; })[0] : null;
+
+  if(applyTo==="fund" && fund){
+    var fd = new Date(date+"T00:00:00");
+    var fy = fd.getFullYear(), fm = fd.getMonth()+1;
+    var spentSoFar = fundSpentInMonth(fund, fy, fm);
+    // Editing an entry already counted toward this same fund/month? Back its old amount out
+    // first so we're checking the real delta, not double-counting it against itself.
+    if(prev && prev.fundLink && prev.fundLink.fundId===fund.id){
+      var prevD = new Date(prev.date+"T00:00:00");
+      if(!isNaN(prevD) && prevD.getFullYear()===fy && (prevD.getMonth()+1)===fm){
+        spentSoFar -= num(prev.amount);
+      }
+    }
+    var remaining = num(fund.budget) - spentSoFar;
+    if(amount - remaining > 0.005){
+      return fail("That's "+usd(amount-remaining)+" more than "+esc(fund.name)+" has left this month ("+usd(Math.max(0,remaining))+" remaining). "
+        + '<button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine);text-decoration:underline" onclick="jfSuggestUnplanned()">Log as Unplanned instead</button>');
+    }
+  }
+
   if(prev) revertJournalFromBill(prev);
+  if(prev) revertBalanceAdjust(prev);
 
   var d = new Date(date+"T00:00:00");
   var billLink = (applyTo==="bill" && billId) ? { y:d.getFullYear(), m:d.getMonth()+1, billId:billId } : null;
   var fundLink = (applyTo==="fund" && fundId) ? { fundId:fundId } : null;
-  var entry = { id: jEditId || ("j"+Date.now()), name:name, amount:amount, date:date, category:cat, applyTo:applyTo, billLink:billLink, fundLink:fundLink };
+  var balanceEl = document.getElementById("jfBalanceAdjust");
+  var wantsBalanceAdjust = (applyTo==="fund" || (applyTo==="none" && cat==="Unplanned")) && balanceEl && balanceEl.getAttribute("data-on")==="1";
+  var balanceAdjust = wantsBalanceAdjust ? { y:d.getFullYear(), m:d.getMonth()+1, amount:amount } : null;
+  var entry = { id: jEditId || ("j"+Date.now()), name:name, amount:amount, date:date, category:cat, applyTo:applyTo, billLink:billLink, fundLink:fundLink, balanceAdjust:balanceAdjust };
   if(billLink) applyJournalToBill(entry);
+  if(balanceAdjust) applyBalanceAdjust(entry);
 
   var found = false;
   S.journal = S.journal.map(function(x){ if(x.id===entry.id){ found=true; return entry; } return x; });
@@ -1990,6 +2090,7 @@ function jfDelete(){
   }
   var e = S.journal.filter(function(x){ return x.id===jEditId; })[0];
   if(e) revertJournalFromBill(e);
+  if(e) revertBalanceAdjust(e);
   S.journal = S.journal.filter(function(x){ return x.id!==jEditId; });
   persist(); closeModal(); render();
 }
@@ -2398,6 +2499,22 @@ function seSave(){
   if(!amount){ err.textContent="Enter an amount above zero."; err.style.display="block"; return; }
   if(!date){ err.textContent="Pick a date."; err.style.display="block"; return; }
   var prior = sEditId ? S.savingsEntries.filter(function(x){return x.id===sEditId;})[0] : null;
+
+  // A goal can't go below $0 — back the entry's own prior contribution out first so editing
+  // an existing entry checks the real delta, not double-counting it against itself.
+  var currentTotal = savingsTotalFor(goalId);
+  if(prior && prior.goalId===goalId){
+    currentTotal -= (prior.type==="withdrawal" ? -num(prior.amount) : num(prior.amount));
+  }
+  var newTotal = currentTotal + (type==="withdrawal" ? -amount : amount);
+  if(newTotal < -0.005){
+    var goal = S.savingsGoals.filter(function(g){ return g.id===goalId; })[0];
+    var maxOut = Math.max(0, currentTotal);
+    err.textContent = "That would take "+(goal?goal.name:"this goal")+" below $0 — the most you can withdraw right now is "+usd(maxOut)+".";
+    err.style.display="block";
+    return;
+  }
+
   var entry = { id: sEditId || ("s"+Date.now()), amount:Math.abs(amount), date:date, note:note, type:type, goalId:goalId,
     billLink: prior ? prior.billLink : undefined };
   var found = false;
@@ -2552,7 +2669,7 @@ var SETTINGS_SECTIONS = [
   ["help", "Help", "How to use Billfold", "help"],
   ["about", "About Billfold", "Privacy, ownership, this device only", "info"],
   ["updates", "What's new", "See recent updates to Billfold", "trend"],
-  ["reset", "Start over", "Restore the original spreadsheet data", "reset"]
+  ["reset", "Start over", "Erase everything and start fresh", "reset"]
 ];
 var DEV_SETTINGS_ROW = ["dev", "Developer options", "PIN-protected diagnostics & testing", "toolbox"];
 /* Developer options stays off this list until revealed via the tap trick + PIN (see devSecretTap),
@@ -2630,6 +2747,40 @@ function settingsDetailScreen(key){
    are just display labels; nothing else in the app reads them. */
 var UPDATE_LOG = [
   {
+    version: "1.7",
+    date: "July 2026",
+    notes: [
+      "A savings withdrawal can no longer take a goal below $0 — same hard-stop treatment as overspending a Fund, with a message naming the most you can actually withdraw."
+    ]
+  },
+  {
+    version: "1.6",
+    date: "July 2026",
+    notes: [
+      "Fixed a real bug: logging spending against a Fund made the Month screen's leftover balance go up, since the fund's shrinking \"not yet spent\" figure reduced what got held back, while Available now never dropped to match. Fund-linked entries now get the same \"Also subtract this from Available now\" toggle Unplanned entries already had, on by default."
+    ]
+  },
+  {
+    version: "1.5",
+    date: "July 2026",
+    notes: [
+      "Spending log entries linked to a Bill or Fund now show one clean line (e.g. \"→ Groceries fund\") instead of a redundant category line plus a separate \"counts toward\" line underneath.",
+      "Full pass through Settings → Help and the setup wizard for stale wording: fixed \"Start over,\" which had described restoring old spreadsheet data since before this was a general finance app — it actually erases everything and starts fresh, and the text now says so. Also corrected several leftover mentions of the old \"Savings goals\" settings name (now \"Income & savings goals\"), and clarified that bill reminders require an explicit toggle rather than turning on automatically once a due day is set."
+    ]
+  },
+  {
+    version: "1.4",
+    date: "July 2026",
+    notes: [
+      "Spending entries can no longer use a free-text category — they now tie to a Bill, a Fund, or the new \"Unplanned\" catch-all. Picking a Fund or Bill from the Category list applies its category automatically, the same one step for both instead of a separate \"Applies to\" toggle.",
+      "Added a default \"Unplanned\" category, always available for one-off spending that isn't a Bill or Fund. Logging one offers to subtract it from that month's Available now automatically (on by default, easy to turn off) — one less manual edit.",
+      "A spending entry can no longer push a Fund over its budget — Billfold blocks the save and offers a one-tap \"Log as Unplanned instead.\"",
+      "Fixed the Month screen's balance math to actually account for Funds: unspent Fund budgets now reduce Available now the same way unpaid Bills do, instead of being invisible to that number entirely.",
+      "\"Start over\" in Settings now relaunches the welcome message and setup wizard automatically, same as a fresh install.",
+      "Modals now auto-focus their first field on desktop/web, so you can start typing or tab through without an extra click. Skipped on touch devices to avoid popping the keyboard unexpectedly."
+    ]
+  },
+  {
     version: "1.3",
     date: "July 2026",
     notes: [
@@ -2647,7 +2798,7 @@ var UPDATE_LOG = [
     notes: [
       "The Play Store rating link and the donation link are now combined into a single \"Enjoying Billfold?\" card.",
       "Renamed \"card names\" to one-time expenses, since that's how most people actually use those 3 slots — rename them right on the Month screen by tapping the name, no more trip to Settings. The old separate \"One-time expenses\" field is gone, folded into these slots.",
-      "Adding a savings goal now lives in Settings → Savings goals (and the setup wizard), instead of only from Reports. Reports still prompts you to add one if you don't have any yet.",
+      "Adding a savings goal now lives in Settings → Income & savings goals (and the setup wizard), instead of only from Reports. Reports still prompts you to add one if you don't have any yet.",
       "Help now includes a glossary — Bill, Fund, Spending entry, Savings entry, Goal — each with a definition and a link straight to that item's add screen.",
       "Bill reminders are now opt-in: a toggle appears on the bill form once you set a due day, instead of turning on automatically.",
       "Removed the \"Note to self\" field — it wasn't pulling its weight."
@@ -2738,13 +2889,15 @@ function goalsSettingsCard(){
 }
 function helpDetailCard(){
   return helpItem("Set up your bills",
-      "Head to the Bills tab and tap “+ Add bill” for every recurring expense — rent or mortgage, utilities, subscriptions, insurance, anything that repeats. Give each one a category, since that’s what powers your reports in the Tools tab. Pick how often it’s due, and if you know the exact day of the month, add that too — it’s what lets Billfold remind you before it’s due. This list is your master registry: everything else in the app pulls from it automatically.")
+      "Head to the Bills tab and tap “+ Add bill” for every recurring expense — rent or mortgage, utilities, subscriptions, insurance, anything that repeats. Give each one a category, since that’s what powers your reports in the Tools tab. Pick how often it’s due, and if you know the exact day of the month, add that too — a toggle will appear letting you turn reminders on for that bill. This list is your master registry: everything else in the app pulls from it automatically.")
     + helpItem("Budget for spending that varies",
-        "For expenses that aren’t a fixed bill — groceries, gas, fun money — switch to the Funds tab inside Bills and set a monthly budget. Log your spending as usual in Log → Spending using the same category, and Billfold does the subtraction for you so you can see what’s left.")
+        "For expenses that aren’t a fixed bill — groceries, gas, fun money — switch to the Funds tab inside Bills and set a monthly budget. When you log spending in Log → Spending, pick that fund from the Category list, and Billfold does the subtraction for you so you can see what’s left. A toggle also offers to subtract it from that month’s Available now — worth leaving on, since otherwise Available now won’t reflect money you’ve actually spent. If an entry would push a fund over its budget, Billfold won’t allow it — log the overage as Unplanned instead.")
+    + helpItem("Why spending entries can only tie to a Bill, a Fund, or Unplanned",
+        "Every spending entry has to point to something real: a Bill you're paying down, a Fund you're budgeting against, or the Unplanned catch-all for anything you didn't plan for. There's no free-text category here on purpose — a fund's budget limit only means something if spending can't quietly slip past it under a different label. New categories are still created normally, just from the Bill or Fund form, where they represent an actual plan rather than a loophole.")
     + helpItem("Track what’s paid",
-        "Open the Month tab. Every bill due that month shows up on its own, pulled straight from your Bills list. Tap the circle next to a bill to mark it paid in full, or tap the bill itself to enter a partial amount. Switch months with the arrows, or tap the month name to jump anywhere, past or future.")
+        "Open the Month tab. Every bill due that month shows up on its own, pulled straight from your Bills list. Tap the circle next to a bill to mark it paid in full, or tap the bill itself to enter a partial amount. Switch months with the arrows, or tap the month name to jump anywhere, past or future. Bills linked to a savings goal work a little differently — see “Bills that feed a savings goal” below.")
     + helpItem("Save toward a goal",
-        "Go to Settings → Savings goals (or add one the first time you open Billfold) to name a goal and set a target — you can keep up to 5 at a time. Log deposits and withdrawals against a goal from Log → Savings; each goal’s card shows what’s saved, what’s left, and how close you are. Tap a goal any time to edit its target or delete it — deleting keeps its logged deposits on record, grouped under “Other.”")
+        "Go to Settings → Income & savings goals (or add one the first time you open Billfold) to name a goal and set a target — you can keep up to 5 at a time. Log deposits and withdrawals against a goal from Log → Savings; each goal’s card shows what’s saved, what’s left, and how close you are. A withdrawal can’t take a goal below $0 — Billfold will cap it and tell you the most you can actually withdraw. Tap a goal any time to edit its target or delete it — deleting keeps its logged deposits on record, grouped under “Other.”")
     + helpItem("Bills that feed a savings goal",
         "If you already treat a recurring transfer — a travel fund, an emergency fund — like a bill, you can link it to a goal instead of a regular category when adding or editing it: pick the goal from the “Savings goals” group in the Category list. Marking a goal-linked bill paid in full logs a matching deposit automatically; it's all-or-nothing, so partial payments aren’t supported. Unpaying it, or deleting the deposit it created, will ask first, since undoing one side undoes the other. Didn’t make the automatic transfer this month? Open the bill and tap “Skip this month” instead of marking it paid — it won’t count toward what’s due, and nothing gets logged.")
     + helpItem("Back up and move your data",
@@ -2755,7 +2908,7 @@ function helpDetailCard(){
     + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.25rem">Glossary</h3>'
     + glossaryItem("Bill", "A recurring, fixed-amount expense — rent, a subscription, insurance — that repeats on a schedule you set.", "Add a bill", "billsSubMode='bills';go('bills');openBillForm(null)")
     + glossaryItem("Fund", "A monthly budget for a category of spending that varies, like groceries or gas, instead of a fixed bill amount.", "Set up a fund", "billsSubMode='funds';go('bills');openFundForm(null)")
-    + glossaryItem("Spending entry", "A single day-to-day expense logged in your ledger, tagged with a category.", "Log a spending entry", "trackMode='journal';go('track');openJournalForm(null)")
+    + glossaryItem("Spending entry", "A single day-to-day expense logged in your ledger, tied to a Bill, a Fund, or marked Unplanned.", "Log a spending entry", "trackMode='journal';go('track');openJournalForm(null)")
     + glossaryItem("Savings entry", "A deposit or withdrawal logged against one of your savings goals.", "Log a savings entry", "trackMode='savings';go('track');openSavingsEntryForm(null)")
     + glossaryItem("Goal", "A named savings target with a dollar amount — up to 5 at a time — that your savings entries count toward.", "Add a goal", "openSettingsSection('goals');openGoalForm(null)");
 }
@@ -2782,9 +2935,9 @@ function aboutDetailCard(){
     + '<p class="muted" style="font-size:.75rem;margin-top:1rem">Made by SimplyRoot</p>';
 }
 function resetDetailCard(){
-  return '<p class="muted" style="font-size:.875rem;margin-bottom:.75rem">Puts back the bills and history from your original spreadsheet, replacing everything here.</p>'
+  return '<p class="muted" style="font-size:.875rem;margin-bottom:.75rem">Erases everything on this device — bills, spending, savings goals, and settings — and starts fresh, exactly like a new install. You\'ll be walked through the welcome message and setup wizard again right after. There\'s no undo, so back up first (Settings → Back up & restore) if you want to keep what\'s here.</p>'
     + '<button class="btn btn-danger'+(confirmReset?" armed":"")+'" onclick="doReset()">'
-    + icon("reset",16)+' '+(confirmReset?"Tap again to confirm":"Restore spreadsheet data")+'</button>';
+    + icon("reset",16)+' '+(confirmReset?"Tap again to confirm":"Erase and start over")+'</button>';
 }
 function helpItem(title, bodyHtml){
   return '<details><summary>'+esc(title)+'</summary><div class="body">'+bodyHtml+'</div></details>';
@@ -2823,7 +2976,7 @@ function focusFirstField(){
 function closeModal(){
   document.getElementById("modalRoot").innerHTML="";
   payId=null; editId=null; confirmDel=false;
-  jEditId=null; jConfirmDel=false; jfApplyTo="none"; sEditId=null; sConfirmDel=false;
+  jEditId=null; jConfirmDel=false; sEditId=null; sConfirmDel=false;
   fundEditId=null; fundConfirmDel=false;
   devForgotArmed=false;
 }
@@ -3732,7 +3885,7 @@ function onboardSaveStep2(){
 }
 function onboardStep3(){
   modal("Set a savings goal",
-    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">Optional — give it a name and a target, or skip and add one later from Settings → Savings goals.</p>'
+    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">Optional — give it a name and a target, or skip and add one later from Settings → Income & savings goals.</p>'
     + '<div class="fgroup"><label class="flabel">Goal name</label>'
     + '<input id="obGoalName" class="field" placeholder="e.g. Emergency fund"></div>'
     + '<div class="fgroup"><label class="flabel">Target amount</label>'
