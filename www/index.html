@@ -164,6 +164,7 @@
   .checkbtn{ flex:none; width:26px; height:26px; border-radius:999px; border:2px solid var(--track);
     display:flex; align-items:center; justify-content:center; color:#fff; transition:background .15s,border-color .15s; }
   .checkbtn.paid{ background:var(--pine); border-color:var(--pine); }
+  .checkbtn.skipped{ background:var(--line); border-color:var(--line); color:var(--sub); display:flex; align-items:center; justify-content:center; }
   .bill-main{ flex:1; display:flex; align-items:center; justify-content:space-between; text-align:left; padding:0; }
   .bill-name{ font-weight:600; font-size:.9rem; }
   .bill-name.done{ text-decoration:line-through; color:var(--sub); }
@@ -336,9 +337,11 @@ function freqText(b){
   return {monthly:"Monthly",even:"Even months",odd:"Odd months"}[b.freq]||"Monthly";
 }
 function catColor(cat){
+  if(typeof cat==="string" && cat.indexOf("→ ")===0) return "var(--pine)";
   var i = S.categories.indexOf(cat);
   return CHART_COLORS[(i<0?0:i)%CHART_COLORS.length];
 }
+function isSkipped(b, y, m){ return !!(b.skipMonths && b.skipMonths.indexOf(mk(y,m))>=0); }
 
 /* ---------- seed data (from the original spreadsheet) ---------- */
 function seedState(){
@@ -472,6 +475,7 @@ function restOfYear(){
     var data = S.months[mk(view.y,m)] || emptyMonth();
     S.bills.forEach(function(b){
       if(!dueInMonth(b,m)) return;
+      if(isSkipped(b, view.y, m)) return;
       sum += leftOf(b,data,1);
       if(b.freq==="semimonthly") sum += leftOf(b,data,2);
     });
@@ -538,8 +542,9 @@ function renderBanner(){
 /* ---------- Month screen ---------- */
 function monthScreen(){
   var data = md(), bills = dueBills();
+  var countable = bills.filter(function(b){ return !isSkipped(b, view.y, view.m); });
   var totalDue=0, stillDue=0, paidCount=0;
-  bills.forEach(function(b){
+  countable.forEach(function(b){
     if(b.freq==="semimonthly"){
       var l1 = leftOf(b,data,1), l2 = leftOf(b,data,2);
       totalDue += num(b.amount)*2; stillDue += l1+l2;
@@ -562,7 +567,7 @@ function monthScreen(){
     + '<button class="btn-round" aria-label="Next month" onclick="step(1)">'+icon("right",20)+'</button>'
     + '</div>'
     + '<div class="track"><div class="fill" style="width:'+pct+'%"></div></div>'
-    + '<div class="track-caption"><span>'+paidCount+' of '+bills.length+' bills paid</span>'
+    + '<div class="track-caption"><span>'+paidCount+' of '+countable.length+' bills paid</span>'
     + '<span class="tnum">'+usd(totalDue-stillDue)+' of '+usd(totalDue)+'</span></div>'
     + '</section>';
 
@@ -592,15 +597,20 @@ function monthScreen(){
   return h;
 }
 function monthBillRow(b, data, occ, subtitle){
-  var l = leftOf(b,data,occ), paid = l===0, partial = !paid && l<num(b.amount);
+  var linked = !!b.linkedGoalId;
+  var skipped = isSkipped(b, view.y, view.m);
+  var l = leftOf(b,data,occ), paid = !skipped && l===0, partial = !skipped && !paid && l<num(b.amount);
+  var payFn = linked ? "openGoalBillPay" : "openPay";
+  var checkOnclick = linked ? "openGoalBillPay('"+b.id+"', "+occ+")" : "togglePaid('"+b.id+"', "+occ+")";
+  var statusColor = skipped ? "var(--sub)" : (paid ? "var(--pine)" : "var(--amber)");
+  var statusText = skipped ? "Skipped" : (paid ? "Paid" : (partial ? usd(l)+" left" : "Due"));
   return '<li><div class="bill-li">'
-    + '<button class="checkbtn'+(paid?" paid":"")+'" aria-label="'+(paid?"Mark unpaid":"Mark paid")+'" onclick="togglePaid(\''+b.id+'\', '+occ+')">'+(paid?icon("check",15):"")+'</button>'
-    + '<button class="bill-main" onclick="openPay(\''+b.id+'\', '+occ+')">'
-    + '<div><div class="bill-name'+(paid?" done":"")+'">'+esc(b.name)+'</div>'
+    + '<button class="checkbtn'+(paid?" paid":"")+(skipped?" skipped":"")+'" aria-label="'+(skipped?"Skipped this month":(paid?"Mark unpaid":"Mark paid"))+'" onclick="'+checkOnclick+'">'+(skipped?icon("x",13):(paid?icon("check",15):""))+'</button>'
+    + '<button class="bill-main" onclick="'+payFn+'(\''+b.id+'\', '+occ+')">'
+    + '<div><div class="bill-name'+(paid?" done":"")+'">'+esc(b.name)+(linked?' <span style="font-size:.7rem;font-weight:600;color:var(--pine)">→ goal</span>':'')+'</div>'
     + '<div class="bill-cat"><span class="cat-dot" style="background:'+catColor(b.category)+'"></span>'+esc(b.category)+(subtitle?' · '+subtitle:'')+'</div></div>'
     + '<div class="bill-amt"><div class="due tnum">'+usd(b.amount)+'</div>'
-    + '<div class="status tnum" style="color:'+(paid?"var(--pine)":"var(--amber)")+'">'
-    + (paid?"Paid":(partial?usd(l)+" left":"Due"))+'</div></div>'
+    + '<div class="status tnum" style="color:'+statusColor+'">'+statusText+'</div></div>'
     + '</button></div></li>';
 }
 function monthBillRows(b, data){
@@ -755,22 +765,19 @@ function billRow(b){
 function billsSection(){
   var active = S.bills.filter(function(b){return b.active;});
   var typical = active.reduce(function(s,b){return s+monthlyEq(b);},0);
-  var busiest = 0;
-  for(var m=1;m<=12;m++){
-    var t = S.bills.reduce(function(s,b){return s+(dueInMonth(b,m)?num(b.amount):0);},0);
-    if(t>busiest) busiest=t;
-  }
-  var leftover = num(S.income)-typical;
+  var income = num(S.income);
+  var pct = income>0 ? Math.round(typical/income*100) : null;
 
-  var h = '<section class="card pad"><h2 class="eyebrow">Income &amp; plan</h2>'
-    + moneyRow("Available funds (monthly)", S.income, "S.income=num(this.value);persist();render()")
-    + '<div style="margin-top:.75rem;font-size:.875rem">'
-    + '<div class="row"><span class="muted">Typical month of bills</span><span class="tnum" style="font-weight:600">'+usd(typical)+'</span></div>'
-    + '<div class="row"><span class="muted">Busiest month</span><span class="tnum" style="font-weight:600">'+usd(busiest)+'</span></div>'
-    + '<div class="row"><span class="muted">Left over (typical month)</span>'
-    + '<span class="tnum" style="font-weight:700;color:'+(leftover>=0?"var(--pine)":"var(--red)")+'">'+usd(leftover)+'</span></div>'
-    + '</div>'
-    + '</section>';
+  var h = '<section class="card pad" style="padding:.85rem 1rem">';
+  if(!income){
+    h += '<div class="row"><span class="muted" style="font-size:.8rem">Monthly income isn’t set</span>'
+      + '<button style="all:unset;cursor:pointer;color:var(--pine);font-size:.8rem;font-weight:600" onclick="go(\'data\');openSettingsSection(\'goals\')">Set it in Settings →</button></div>';
+  } else {
+    h += '<div class="row"><span class="muted" style="font-size:.8rem">Bills use '+Math.min(999,pct)+'% of monthly income</span>'
+      + '<span class="tnum" style="font-size:.8rem;font-weight:600">'+usd(typical)+' of '+usd(income)+'</span></div>'
+      + '<div class="track" style="margin-top:.45rem"><div class="fill" style="width:'+Math.min(100,pct)+'%;background:'+(pct>100?"var(--red)":"var(--pine)")+'"></div></div>';
+  }
+  h += '</section>';
 
   if(S.bills.length===0) return h;
 
@@ -807,9 +814,21 @@ function billsSection(){
 
   if(billsSort==="cat_group"){
     var groups = S.categories.map(function(c){
-      return {cat:c, bills:visible.filter(function(b){return b.category===c;})};
+      return {cat:c, bills:visible.filter(function(b){return !b.linkedGoalId && b.category===c;})};
     }).filter(function(g){return g.bills.length>0;});
-    var stray = visible.filter(function(b){return S.categories.indexOf(b.category)<0;});
+
+    // Goal-linked bills get their own bucket per goal, kept separate from spending categories
+    // and from genuinely uncategorized bills below.
+    var goalGroups = {};
+    var goalOrder = [];
+    visible.filter(function(b){return b.linkedGoalId;}).forEach(function(b){
+      var label = b.category;
+      if(!goalGroups[label]){ goalGroups[label] = []; goalOrder.push(label); }
+      goalGroups[label].push(b);
+    });
+    goalOrder.forEach(function(label){ groups.push({cat:label, bills:goalGroups[label]}); });
+
+    var stray = visible.filter(function(b){return !b.linkedGoalId && S.categories.indexOf(b.category)<0;});
     if(stray.length) groups.push({cat:"Uncategorized", bills:stray});
 
     groups.forEach(function(g){
@@ -1622,6 +1641,13 @@ function setBillLeftAt(y,m,billId,value){
   if(!S.months[k].left) S.months[k].left = {};
   S.months[k].left[billId] = value;
 }
+function setBillLeftAtOcc(y,m,billId,value,occ){
+  var k = mk(y,m);
+  if(!S.months[k]) S.months[k] = emptyMonth();
+  if(!S.months[k].left) S.months[k].left = {};
+  var key = leftKey(billId, occ||1);
+  if(value===undefined) delete S.months[k].left[key]; else S.months[k].left[key] = value;
+}
 function applyJournalToBill(entry){
   if(!entry.billLink) return;
   var bill = S.bills.filter(function(b){ return b.id===entry.billLink.billId; })[0];
@@ -2023,6 +2049,34 @@ function ensureActiveSavingsGoal(){
   if(!found){ activeSavingsGoalId = S.savingsGoals[0].id; found = S.savingsGoals[0]; }
   return found;
 }
+/* --- goal-linked bills: marking one paid logs a matching deposit; unpaying or deleting
+   either side keeps the other in sync. All-or-nothing only — no partial deposits. --- */
+function goalDepositEntry(billId, y, m, occ){
+  return S.savingsEntries.filter(function(e){
+    return e.billLink && e.billLink.billId===billId && e.billLink.y===y && e.billLink.m===m && e.billLink.occ===(occ||1);
+  })[0];
+}
+function createGoalDeposit(b, y, m, occ){
+  if(!b.linkedGoalId) return;
+  if(!S.savingsGoals.some(function(g){ return g.id===b.linkedGoalId; })) return; // linked goal was deleted — behave like a normal bill
+  var existing = goalDepositEntry(b.id, y, m, occ);
+  if(existing) return; // already logged, don't double up
+  S.savingsEntries.push({
+    id: "s"+Date.now(),
+    date: new Date().toISOString().slice(0,10),
+    note: "",
+    type: "deposit",
+    amount: num(b.amount),
+    goalId: b.linkedGoalId,
+    billLink: { billId:b.id, y:y, m:m, occ:occ||1 }
+  });
+  activeSavingsGoalId = b.linkedGoalId;
+}
+function deleteGoalDeposit(billId, y, m, occ){
+  S.savingsEntries = S.savingsEntries.filter(function(e){
+    return !(e.billLink && e.billLink.billId===billId && e.billLink.y===y && e.billLink.m===m && e.billLink.occ===(occ||1));
+  });
+}
 function savingsTotal(){
   return S.savingsEntries.reduce(function(s,e){ return s + (e.type==="withdrawal" ? -num(e.amount) : num(e.amount)); },0);
 }
@@ -2150,10 +2204,16 @@ function savingsEntryRow(e){
     metaLine = g ? esc(g.name) : "Other";
     if(e.note) metaLine += " · " + esc(e.note);
   }
+  var billTag = "";
+  if(e.billLink){
+    var lb = S.bills.filter(function(x){ return x.id===e.billLink.billId; })[0];
+    if(lb) billTag = '<div style="font-size:.72rem;color:var(--pine);margin-top:.1rem">→ from bill: '+esc(lb.name)+'</div>';
+  }
   return '<li><button class="bill-li" style="width:100%;text-align:left" onclick="openSavingsEntryForm(\''+e.id+'\')">'
     + '<div style="flex:1"><div class="bill-name">'+esc(fmtDateLabel(e.date))
     + (isW ? ' <span style="font-size:.7rem;font-weight:600;color:var(--red)">Withdrawal</span>' : '') + '</div>'
     + (metaLine ? '<div class="bill-cat">'+metaLine+'</div>' : '')
+    + billTag
     + '</div><span class="tnum" style="font-weight:700;font-size:.9rem;color:'+(isW?"var(--red)":"var(--pine)")+'">'
     + (isW?"−":"+")+usd(e.amount)+'</span>'
     + '</button></li>';
@@ -2270,6 +2330,7 @@ function sgSave(){
     S.savingsGoals.push(goal);
   }
   activeSavingsGoalId = goal.id;
+  S.bills.forEach(function(b){ if(b.linkedGoalId===goal.id) b.category = "→ "+goal.name; });
   persist(); closeModal(); render();
 }
 function sgDelete(){
@@ -2301,8 +2362,10 @@ function openSavingsEntryForm(id){
     : '<div class="fgroup"><label class="flabel">Goal</label>'
       + '<div class="field" style="display:flex;align-items:center;color:var(--sub)">'+(oneGoal?esc(oneGoal.name):"—")+'</div>'
       + '<input type="hidden" id="seGoal" value="'+esc(goalId||"")+'"></div>';
+  var linkedBill = e && e.billLink ? S.bills.filter(function(x){ return x.id===e.billLink.billId; })[0] : null;
   modal(e ? "Edit entry" : "Add an entry",
     goalField
+    + (linkedBill ? '<p class="muted" style="font-size:.8rem;margin-bottom:.75rem">This deposit was logged automatically from the bill <b style="color:var(--ink)">'+esc(linkedBill.name)+'</b>. Deleting it will mark that bill unpaid again.</p>' : '')
     + '<div class="fgroup"><label class="flabel">Type</label>'
     + '<div class="seg" style="width:100%;margin:0">'
     + '<button type="button" id="seTypeDep" style="flex:1" class="'+(type==="deposit"?"on":"")+'" onclick="seSetType(\'deposit\')">Deposit</button>'
@@ -2334,7 +2397,9 @@ function seSave(){
   var err = document.getElementById("seErr");
   if(!amount){ err.textContent="Enter an amount above zero."; err.style.display="block"; return; }
   if(!date){ err.textContent="Pick a date."; err.style.display="block"; return; }
-  var entry = { id: sEditId || ("s"+Date.now()), amount:Math.abs(amount), date:date, note:note, type:type, goalId:goalId };
+  var prior = sEditId ? S.savingsEntries.filter(function(x){return x.id===sEditId;})[0] : null;
+  var entry = { id: sEditId || ("s"+Date.now()), amount:Math.abs(amount), date:date, note:note, type:type, goalId:goalId,
+    billLink: prior ? prior.billLink : undefined };
   var found = false;
   S.savingsEntries = S.savingsEntries.map(function(x){ if(x.id===entry.id){ found=true; return entry; } return x; });
   if(!found) S.savingsEntries.push(entry);
@@ -2345,11 +2410,17 @@ function seDelete(){
   if(!sConfirmDel){
     sConfirmDel = true;
     var btn = document.getElementById("seDel");
-    btn.textContent = "Tap again to delete for good";
+    var entry = S.savingsEntries.filter(function(x){return x.id===sEditId;})[0];
+    btn.textContent = (entry && entry.billLink) ? "Tap again — this also marks the linked bill unpaid" : "Tap again to delete for good";
     btn.className = "btn btn-danger armed";
     return;
   }
+  var entry = S.savingsEntries.filter(function(x){return x.id===sEditId;})[0];
   S.savingsEntries = S.savingsEntries.filter(function(x){ return x.id!==sEditId; });
+  if(entry && entry.billLink){
+    setBillLeftAtOcc(entry.billLink.y, entry.billLink.m, entry.billLink.billId, undefined, entry.billLink.occ);
+    if(S.remindersOn) scheduleRemindersDebounced();
+  }
   persist(); closeModal(); render();
 }
 function exportSavingsCsv(){
@@ -2429,6 +2500,7 @@ function nextReminderFireAt(b){
     var m = startM + i, y = startY;
     while(m>12){ m-=12; y++; }
     if(!dueInMonth(b,m)) continue;
+    if(isSkipped(b,y,m)) continue;
     occurrences.forEach(function(day, idx){
       if(!day) return;
       var occ = idx+1;
@@ -2473,7 +2545,7 @@ function toggleBillRemind(id){
 /* ---------- Settings: list + drill-down detail pattern ---------- */
 var SETTINGS_SECTIONS = [
   ["backup", "Back up & restore", "Save a copy, move to a new phone", "down"],
-  ["goals", "Savings goals", "Add, rename, or remove goals", "trend"],
+  ["goals", "Income & savings goals", "Set monthly income, manage goals", "trend"],
   ["reminders", "Reminders", "Get a heads-up before bills are due", "calendar"],
   ["appearance", "Appearance", "Light, dark, or match your device", "theme"],
   ["lock", "App lock", "Require a PIN to open Billfold", "lock"],
@@ -2513,12 +2585,19 @@ function settingsRow(key, title, subtitle, iconName){
     + '</button></li>';
 }
 function settingsListScreen(){
+  var devHint = (isWebOnly() && !S.devOptionsRevealed)
+    ? '<button onclick="openDevPinPrompt()" aria-label="Developer options" '
+      + 'style="all:unset;cursor:pointer;color:var(--line);font-size:.65rem;padding:.2rem;margin-top:.5rem;display:inline-block">•</button>'
+    : '';
   return '<section class="card pad">'
     + '<div style="font-weight:600;font-size:.9rem;display:flex;align-items:center;gap:.4rem">'
     + '<span class="cat-dot" style="width:8px;height:8px;background:var(--pine)"></span>Saved on this device</div>'
     + '<p class="muted" style="font-size:.8rem;margin-top:.25rem">Every change is saved automatically, right here, as you type. Nothing to press.</p>'
-    + '<button onclick="devSecretTap()" style="all:unset;cursor:default;display:block;color:var(--sub);font-size:.75rem;margin-top:.5rem">Last saved: '
+    + '<div class="row" style="margin-top:.5rem">'
+    + '<button onclick="devSecretTap()" style="all:unset;cursor:default;display:block;color:var(--sub);font-size:.75rem">Last saved: '
     + (S.lastSaved ? esc(new Date(S.lastSaved).toLocaleString()) : "just now") + '</button>'
+    + devHint
+    + '</div>'
     + '</section>'
     + '<section class="card"><ul class="plain">'
     + visibleSettingsSections().map(function(s){ return settingsRow(s[0], s[1], s[2], s[3]); }).join("")
@@ -2530,7 +2609,7 @@ function dataScreen(){
 }
 function settingsDetailScreen(key){
   if(key==="dev" && !devUnlocked){ settingsSubScreen = null; return settingsListScreen(); }
-  var titles = {backup:"Back up & restore", goals:"Savings goals", reminders:"Reminders", appearance:"Appearance", lock:"App lock", help:"Help", about:"About Billfold", updates:"What's new", reset:"Start over", dev:"Developer options"};
+  var titles = {backup:"Back up & restore", goals:"Income & savings goals", reminders:"Reminders", appearance:"Appearance", lock:"App lock", help:"Help", about:"About Billfold", updates:"What's new", reset:"Start over", dev:"Developer options"};
   var body;
   if(key==="backup") body = backupDetailCard();
   else if(key==="goals") body = goalsSettingsCard();
@@ -2550,6 +2629,18 @@ function settingsDetailScreen(key){
    couple around so people can see recent history, not just whatever's brand new. version/date
    are just display labels; nothing else in the app reads them. */
 var UPDATE_LOG = [
+  {
+    version: "1.3",
+    date: "July 2026",
+    notes: [
+      "Bills can now be linked to a savings goal instead of a regular category — for a recurring transfer you already treat like a bill. Marking one paid logs a matching deposit automatically (all-or-nothing, no partial payments); unpaying or deleting either side asks first, since it undoes the other.",
+      "Added \"Skip this month\" for goal-linked bills, for a month the automatic transfer didn't happen.",
+      "Moved monthly income out of the Bills tab and into Settings, combined with Savings goals into one \"Income & savings goals\" section. Bills now just shows a compact \"% of income used\" indicator.",
+      "The \"+ Add savings\" button no longer appears when there are no goals yet — you can't log savings without a goal to log it against, and the app no longer implies otherwise.",
+      "Added a small, discreet way to unlock Developer options on the web preview, since the 5-tap trick isn't reliable there.",
+      "The empty Bills list on Month now links straight to Add a bill instead of just naming the Bills tab."
+    ]
+  },
   {
     version: "1.2",
     date: "July 2026",
@@ -2604,11 +2695,31 @@ function backupDetailCard(){
     + '<p class="muted" style="font-size:.75rem;margin-top:.7rem"><b>Back up</b> makes a file and lets you pick the name and where to save it (Files, Drive, email…). Use the same name and choose “Replace” if asked, to overwrite the old copy instead of piling up new ones. <b>Restore</b> opens a saved backup file and loads it. Restoring replaces the data on that device, so restore before making new edits there.</p>';
 }
 function goalsSettingsCard(){
+  var active = S.bills.filter(function(b){return b.active;});
+  var typical = active.reduce(function(s,b){return s+monthlyEq(b);},0);
+  var busiest = 0;
+  for(var m=1;m<=12;m++){
+    var t = S.bills.reduce(function(s,b){return s+(dueInMonth(b,m)?num(b.amount):0);},0);
+    if(t>busiest) busiest=t;
+  }
+  var leftover = num(S.income)-typical;
+
+  var h = '<h2 class="eyebrow">Income &amp; plan</h2>'
+    + moneyRow("Available funds (monthly)", S.income, "S.income=num(this.value);persist();render()")
+    + '<div style="margin-top:.75rem;font-size:.875rem">'
+    + '<div class="row"><span class="muted">Typical month of bills</span><span class="tnum" style="font-weight:600">'+usd(typical)+'</span></div>'
+    + '<div class="row"><span class="muted">Busiest month</span><span class="tnum" style="font-weight:600">'+usd(busiest)+'</span></div>'
+    + '<div class="row"><span class="muted">Left over (typical month)</span>'
+    + '<span class="tnum" style="font-weight:700;color:'+(leftover>=0?"var(--pine)":"var(--red)")+'">'+usd(leftover)+'</span></div>'
+    + '</div>'
+    + '<div class="divider"></div>'
+    + '<h2 class="eyebrow">Savings goals</h2>';
+
   if(!S.savingsGoals.length){
-    return '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">No goals yet. Give one a name and a target, then log deposits from Log → Savings. You can add up to 5.</p>'
+    return h + '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">No goals yet. Give one a name and a target, then log deposits from Log → Savings. You can add up to 5.</p>'
       + '<button class="btn btn-pine" style="width:100%" onclick="openGoalForm(null)">+ Add goal</button>';
   }
-  var h = '<ul class="plain">' + S.savingsGoals.map(function(g){
+  h += '<ul class="plain">' + S.savingsGoals.map(function(g){
     var saved = savingsTotalFor(g.id);
     var target = num(g.target);
     var pct = target>0 ? Math.max(0, Math.min(100, saved/target*100)) : 0;
@@ -2634,10 +2745,12 @@ function helpDetailCard(){
         "Open the Month tab. Every bill due that month shows up on its own, pulled straight from your Bills list. Tap the circle next to a bill to mark it paid in full, or tap the bill itself to enter a partial amount. Switch months with the arrows, or tap the month name to jump anywhere, past or future.")
     + helpItem("Save toward a goal",
         "Go to Settings → Savings goals (or add one the first time you open Billfold) to name a goal and set a target — you can keep up to 5 at a time. Log deposits and withdrawals against a goal from Log → Savings; each goal’s card shows what’s saved, what’s left, and how close you are. Tap a goal any time to edit its target or delete it — deleting keeps its logged deposits on record, grouped under “Other.”")
+    + helpItem("Bills that feed a savings goal",
+        "If you already treat a recurring transfer — a travel fund, an emergency fund — like a bill, you can link it to a goal instead of a regular category when adding or editing it: pick the goal from the “Savings goals” group in the Category list. Marking a goal-linked bill paid in full logs a matching deposit automatically; it's all-or-nothing, so partial payments aren’t supported. Unpaying it, or deleting the deposit it created, will ask first, since undoing one side undoes the other. Didn’t make the automatic transfer this month? Open the bill and tap “Skip this month” instead of marking it paid — it won’t count toward what’s due, and nothing gets logged.")
     + helpItem("Back up and move your data",
         "Everything saves automatically on this device as you use it — there’s nothing to press. To keep a safety copy, or move your data to a new phone, go to Settings → Back up & restore and choose a name and where to save the file. On the new device, open Billfold and use Settings → Back up & restore → Restore to load it back in. Restoring replaces what’s already on that device, so restore before making new edits there.")
     + helpItem("What each tab does",
-        "<b>Month</b> — see what’s due this month and mark bills paid.<br><b>Bills</b> — manage your full list of recurring bills, and set budgets for variable spending under Funds.<br><b>Log</b> — log everyday spending, or deposits and withdrawals toward your savings goals.<br><b>Tools</b> — open Reports to see where your money’s going by category, or Calculator for quick math and investment projections.<br><b>Settings</b> — back up your data, manage savings goals, tweak preferences, and find these help pages.")
+        "<b>Month</b> — see what’s due this month and mark bills paid.<br><b>Bills</b> — manage your full list of recurring bills, and set budgets for variable spending under Funds.<br><b>Log</b> — log everyday spending, or deposits and withdrawals toward your savings goals.<br><b>Tools</b> — open Reports to see where your money’s going by category, or Calculator for quick math and investment projections.<br><b>Settings</b> — back up your data, set your monthly income, manage savings goals, tweak preferences, and find these help pages.")
     + '<div class="divider" style="margin:1rem 0"></div>'
     + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.25rem">Glossary</h3>'
     + glossaryItem("Bill", "A recurring, fixed-amount expense — rent, a subscription, insurance — that repeats on a schedule you set.", "Add a bill", "billsSubMode='bills';go('bills');openBillForm(null)")
@@ -2727,22 +2840,90 @@ function paySave(){
   if(payId!==null && inp){ setLeft(payId, num(inp.value), payOcc); }
   closeModal();
 }
+/* --- goal-linked bills: their own pay modal — all-or-nothing, plus a skip-this-month option --- */
+var goalUnpayArmed = false;
+function openGoalBillPay(id, occ){
+  payId = id; payOcc = occ || 1;
+  goalUnpayArmed = false;
+  var b = S.bills.filter(function(x){return x.id===id;})[0];
+  if(!b) return;
+  var goal = S.savingsGoals.filter(function(g){ return g.id===b.linkedGoalId; })[0];
+  var y = view.y, m = view.m;
+  var skipped = isSkipped(b, y, m);
+  var paid = !skipped && leftOf(b, null, payOcc)===0;
+  var occNote = b.freq==="semimonthly" ? (payOcc===2 ? " · 2nd payment" : " · 1st payment") : "";
+  var depositNote = goal
+    ? 'Marking this paid logs a '+usd(b.amount)+' deposit to <b style="color:var(--ink)">'+esc(goal.name)+'</b>. Partial payments aren\'t supported for goal-linked bills.'
+    : 'The savings goal this bill was linked to no longer exists, so marking it paid now behaves like a normal bill — no deposit will be logged.';
+  modal(esc(b.name),
+    '<p class="muted" style="font-size:.875rem;margin-bottom:.75rem">'+usd(b.amount)+' · '+freqText(b)+occNote+'</p>'
+    + '<p class="muted" style="font-size:.8rem;margin-bottom:1rem">'+depositNote+'</p>'
+    + (skipped ? '<p style="font-size:.85rem;font-weight:600;margin-bottom:1rem">Skipped this month — nothing due, nothing logged.</p>' : '')
+    + (paid
+        ? '<button id="goalUnpayBtn" class="btn btn-ghost" style="width:100%;margin-bottom:.5rem" onclick="goalBillUnpay()">Mark not paid</button>'
+        : '<button class="btn btn-pine" style="width:100%;margin-bottom:.5rem" onclick="goalBillMarkPaid()"'+(skipped?' disabled':'')+'>'+icon("check",16)+' Mark paid in full</button>')
+    + '<button class="btn btn-ghost" style="width:100%" onclick="goalBillSkipToggle()">'+(skipped?"Clear skip — due again this month":"Skip this month")+'</button>');
+}
+function goalBillMarkPaid(){
+  var b = S.bills.filter(function(x){return x.id===payId;})[0];
+  if(!b) return;
+  createGoalDeposit(b, view.y, view.m, payOcc);
+  setLeft(payId, 0, payOcc);
+  closeModal();
+}
+function goalBillUnpay(){
+  var b = S.bills.filter(function(x){return x.id===payId;})[0];
+  if(!b) return;
+  var entry = goalDepositEntry(payId, view.y, view.m, payOcc);
+  if(entry && !goalUnpayArmed){
+    goalUnpayArmed = true;
+    var btn = document.getElementById("goalUnpayBtn");
+    if(btn){ btn.textContent = "Tap again — this deletes the "+usd(entry.amount)+" deposit"; btn.className = "btn btn-danger armed"; }
+    return;
+  }
+  if(entry) deleteGoalDeposit(payId, view.y, view.m, payOcc);
+  setLeft(payId, undefined, payOcc);
+  closeModal();
+}
+function goalBillSkipToggle(){
+  var b = S.bills.filter(function(x){return x.id===payId;})[0];
+  if(!b) return;
+  var y = view.y, m = view.m;
+  if(!b.skipMonths) b.skipMonths = [];
+  var key = mk(y,m);
+  var i = b.skipMonths.indexOf(key);
+  if(i>=0){
+    b.skipMonths.splice(i,1);
+  } else {
+    var entry = goalDepositEntry(b.id, y, m, payOcc);
+    if(entry) deleteGoalDeposit(b.id, y, m, payOcc);
+    setBillLeftAtOcc(y, m, b.id, undefined, payOcc);
+    b.skipMonths.push(key);
+  }
+  persist(); closeModal(); render();
+  if(S.remindersOn) scheduleRemindersDebounced();
+}
 
 /* --- bill form --- */
 function openBillForm(id){
   editId = id; confirmDel = false;
   var b = id ? S.bills.filter(function(x){return x.id===id;})[0] : null;
   var freq = b ? b.freq : "monthly";
-  var cat = b ? b.category : (S.categories[0] || "__new");
+  var cat = b ? (b.linkedGoalId ? "__goal__"+b.linkedGoalId : b.category) : (S.categories[0] || "__new");
   var opts = S.categories.map(function(c){
     return '<option value="'+esc(c)+'"'+(c===cat?" selected":"")+'>'+esc(c)+'</option>';
-  }).join("") + '<option value="__new">+ New category…</option>';
+  }).join("") + '<option value="__new">+ New category…</option>'
+    + (S.savingsGoals.length ? '<optgroup label="Savings goals">' + S.savingsGoals.map(function(g){
+        var val = "__goal__"+g.id;
+        return '<option value="'+esc(val)+'"'+(val===cat?" selected":"")+'>→ '+esc(g.name)+'</option>';
+      }).join("") + '</optgroup>' : '');
   var monthOpts = MONTHS.map(function(mn,i){
     return '<option value="'+(i+1)+'"'+((b&&b.month)===i+1?" selected":"")+'>'+mn+'</option>';
   }).join("");
   var isActive = b ? !!b.active : true;
   var hasDueDay = !!(b && (b.dueDay || b.dueDay2));
   var remindOn = b ? !b.remindOff : false;
+  var isGoalCat = cat.indexOf("__goal__")===0;
 
   modal(b ? "Edit bill" : "Add a bill",
     '<div class="fgroup"><label class="flabel">Name</label>'
@@ -2769,14 +2950,21 @@ function openBillForm(id){
     + '<span id="bfRemind" class="toggle'+(remindOn?" on":"")+'" data-on="'+(remindOn?1:0)+'"><span class="knob"></span></span></button>'
     + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">You can change this anytime in Settings → Reminders.</p></div>'
     + '<div class="fgroup"><label class="flabel">Category</label>'
-    + '<select id="bfCat" class="field" onchange="document.getElementById(\'bfNewCatWrap\').className=this.value===\'__new\'?\'\':\'hidden\'">'+opts+'</select>'
-    + '<div id="bfNewCatWrap" class="' + (cat === "__new" ? "" : "hidden") + '"><input id="bfNewCat" class="field" style="margin-top:.5rem" placeholder="Category name"></div></div>'
+    + '<select id="bfCat" class="field" onchange="bfCatChange(this.value)">'+opts+'</select>'
+    + '<div id="bfNewCatWrap" class="' + (cat === "__new" ? "" : "hidden") + '"><input id="bfNewCat" class="field" style="margin-top:.5rem" placeholder="Category name"></div>'
+    + '<p id="bfGoalNote" class="muted'+(isGoalCat?"":" hidden")+'" style="font-size:.72rem;margin-top:.5rem">Marking this bill paid in full will log a matching deposit to that goal — partial payments aren\'t supported for goal-linked bills. Unpaying or deleting either side will ask before undoing the other.</p>'
+    + '</div>'
     + '<div class="fgroup"><button class="field row" style="cursor:pointer" onclick="bfToggle(this)">'
     + '<span id="bfActiveLbl" style="font-size:.875rem;font-weight:500">'+(isActive?"Active — counts in every screen":"Paused — kept, but not counted")+'</span>'
     + '<span id="bfActive" class="toggle'+(isActive?" on":"")+'" data-on="'+(isActive?1:0)+'"><span class="knob"></span></span></button></div>'
     + '<p id="bfErr" class="msg-err" style="display:none"></p>'
     + '<button class="btn btn-pine" style="width:100%;margin-top:1rem;padding:.8rem" onclick="bfSave()">'+(b?"Save changes":"Add bill")+'</button>'
     + (b ? '<button id="bfDel" class="btn btn-danger" style="width:100%;margin-top:.5rem" onclick="bfDelete()">Delete this bill</button>' : ''));
+}
+function bfCatChange(val){
+  document.getElementById("bfNewCatWrap").className = val==="__new" ? "" : "hidden";
+  var note = document.getElementById("bfGoalNote");
+  if(note) note.className = "muted" + (val.indexOf("__goal__")===0 ? "" : " hidden");
 }
 function bfFreqChange(val){
   document.getElementById("bfMonthWrap").className = val==="yearly" ? "" : "hidden";
@@ -2810,7 +2998,9 @@ function bfSave(){
   var amount = num(document.getElementById("bfAmount").value);
   var freq = document.getElementById("bfFreq").value;
   var catSel = document.getElementById("bfCat").value;
-  var cat = catSel==="__new" ? document.getElementById("bfNewCat").value.trim() : catSel;
+  var linkedGoalId = catSel.indexOf("__goal__")===0 ? catSel.slice(8) : undefined;
+  var goal = linkedGoalId ? S.savingsGoals.filter(function(g){ return g.id===linkedGoalId; })[0] : null;
+  var cat = linkedGoalId ? ("→ "+(goal?goal.name:"Deleted goal")) : (catSel==="__new" ? document.getElementById("bfNewCat").value.trim() : catSel);
   var month = parseInt(document.getElementById("bfMonth").value,10) || 1;
   var dueDayRaw = parseInt(document.getElementById("bfDueDay").value,10);
   var dueDay = (dueDayRaw>=1 && dueDayRaw<=31) ? dueDayRaw : null;
@@ -2824,12 +3014,15 @@ function bfSave(){
   if(!name) return fail("Give the bill a name.");
   if(!amount) return fail("Enter an amount above zero.");
   if(!cat) return fail("Pick or type a category.");
+  var prior = editId ? S.bills.filter(function(x){return x.id===editId;})[0] : null;
   var bill = { id: editId || ("b"+Date.now()), name:name, amount:amount, freq:freq,
-    month: freq==="yearly"?month:undefined, dueDay:dueDay, dueDay2: freq==="semimonthly"?dueDay2:undefined, category:cat, active:active, remindOff:remindOff };
+    month: freq==="yearly"?month:undefined, dueDay:dueDay, dueDay2: freq==="semimonthly"?dueDay2:undefined,
+    category:cat, active:active, remindOff:remindOff, linkedGoalId:linkedGoalId,
+    skipMonths: prior ? prior.skipMonths : undefined };
   var found = false;
   S.bills = S.bills.map(function(b){ if(b.id===bill.id){found=true; return bill;} return b; });
   if(!found) S.bills.push(bill);
-  if(S.categories.indexOf(cat)<0) S.categories.push(cat);
+  if(!linkedGoalId && S.categories.indexOf(cat)<0) S.categories.push(cat); // goal buckets stay out of the spending category list
   persist(); closeModal(); render();
   if(S.remindersOn) scheduleRemindersDebounced();
 }
@@ -2934,6 +3127,7 @@ function rescheduleReminders(){
         if(!b.active) return;
         if(b.remindOff) return; // muted individually in Settings → Reminders
         if(!dueInMonth(b,m)) return;
+        if(isSkipped(b,y,m)) return;
         var occurrences = b.freq==="semimonthly" ? [[1,b.dueDay],[2,b.dueDay2]] : [[1,b.dueDay]];
         occurrences.forEach(function(pair){
           var occ = pair[0], day = pair[1];
@@ -3506,7 +3700,8 @@ function onboardSaveStep1(){
 function onboardStep2(){
   var data = touchMonth();
   modal("Your available balance",
-    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">This is what\'s in your checking account right now — not your monthly income. Billfold uses it to show what\'s left after this month\'s bills and card payments.</p>'
+    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">This is what\'s in your checking account right now — not your monthly income. Billfold uses it to show what\'s left after this month\'s bills and expenses.</p>'
+    + '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">Keeping this current is what lets Billfold tell you whether you\'re actually on track, so it\'s worth a quick update whenever your balance changes.</p>'
     + '<div class="fgroup"><label class="flabel">Available now</label>'
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
     + '<input id="obBalance" class="tnum" inputmode="decimal" value="'+(data.balance?data.balance:"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
