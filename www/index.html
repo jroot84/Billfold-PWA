@@ -626,6 +626,7 @@ function togglePaid(billId, occ){
   var b = billsList().filter(function(x){return x.id===billId;})[0];
   if(!b) return;
   if(leftOf(b,null,occ)===0) setLeft(billId, undefined, occ); else setLeft(billId, 0, occ);
+  showBalanceWarning();
 }
 function step(d){
   var m = view.m + d, y = view.y;
@@ -644,6 +645,14 @@ function render(){
   else if(view.screen==="track") el.innerHTML = trackScreen();
   else if(view.screen==="reports") el.innerHTML = reportsScreen();
   else el.innerHTML = dataScreen();
+}
+function showBalanceWarning(){
+  if(!balanceWarning) return;
+  var msg = balanceWarning;
+  balanceWarning = null;
+  modal("Available now capped at $0",
+    '<p class="muted" style="font-size:.875rem;margin-bottom:1rem">'+esc(msg)+'</p>'
+    + '<button class="btn btn-pine" style="width:100%" onclick="closeModal()">Got it</button>');
 }
 function renderNav(){
   var tabs = [["month","Month","calendar"],["bills","Bills","list"],["track","Log","journal"],["reports","Tools","toolbox"],["data","Settings","settings"]];
@@ -1706,6 +1715,24 @@ function billLeftAt(y,m,billId,occ){
   var v = data.left ? data.left[leftKey(billId, occ||1)] : undefined;
   return (v===undefined||v===null) ? fullAmountFor(bill, data, occ) : num(v);
 }
+/* Shared by every automatic balance reduction (marking a bill paid, an Unplanned entry's
+   optional toggle). Available now can't be pushed below $0 by an automatic action — it clamps
+   there instead, and flags a warning for the next render to surface, since a silent clamp
+   would otherwise hide the fact that the real balance is likely lower than what's shown. */
+var balanceWarning = null;
+function subtractBalanceAt(y, m, amount){
+  if(!amount) return;
+  var k = mk(y,m);
+  if(!S.months[k]) S.months[k] = emptyMonth();
+  var cur = num(S.months[k].balance);
+  var next = num(cur - amount);
+  if(next < 0){
+    S.months[k].balance = 0;
+    balanceWarning = "Available now didn't have enough to cover this — it would have gone to "+usd(next)+", so it's been capped at $0 instead. Your real balance is likely lower than what's shown; worth double-checking and updating it if so.";
+  } else {
+    S.months[k].balance = next;
+  }
+}
 function setBillLeftAtOcc(y,m,billId,value,occ){
   var b = billsList().filter(function(x){return x.id===billId;})[0];
   var k = mk(y,m);
@@ -1717,7 +1744,8 @@ function setBillLeftAtOcc(y,m,billId,value,occ){
     var beforeAmt = (beforeRaw===undefined) ? fullAmountFor(b, S.months[k], occ) : num(beforeRaw);
     var afterAmt = (value===undefined) ? fullAmountFor(b, S.months[k], occ) : num(value);
     var delta = beforeAmt - afterAmt; // positive = paying down further, negative = un-paying
-    if(delta) S.months[k].balance = num(num(S.months[k].balance) - delta);
+    if(delta>0) subtractBalanceAt(y, m, delta);
+    else if(delta<0) S.months[k].balance = num(num(S.months[k].balance) - delta);
   }
   if(value===undefined) delete S.months[k].left[key]; else S.months[k].left[key] = value;
 }
@@ -1725,9 +1753,7 @@ function setBillLeftAtOcc(y,m,billId,value,occ){
    balance by the same amount, so a one-off expense doesn't need a second manual edit. */
 function applyBalanceAdjust(entry){
   if(!entry.balanceAdjust) return;
-  var k = mk(entry.balanceAdjust.y, entry.balanceAdjust.m);
-  if(!S.months[k]) S.months[k] = emptyMonth();
-  S.months[k].balance = num(num(S.months[k].balance) - num(entry.balanceAdjust.amount));
+  subtractBalanceAt(entry.balanceAdjust.y, entry.balanceAdjust.m, num(entry.balanceAdjust.amount));
 }
 function revertBalanceAdjust(entry){
   if(!entry.balanceAdjust) return;
@@ -1929,8 +1955,6 @@ function jfUnplannedToggle(btn){
   if(note) note.textContent = on
     ? "Off — counts normally against the fund's budget. Turn this on if the amount would exceed what's left."
     : "On — this entry won't push the fund's remaining below $0. It still shows in reports under the fund's category.";
-  var wrap = document.getElementById("jfBalanceWrap");
-  if(wrap) wrap.className = "fgroup" + (on ? " hidden" : "");
 }
 function jfBalanceMonthLabel(dateStr){
   var d = new Date(dateStr+"T00:00:00");
@@ -1982,7 +2006,7 @@ function openJournalForm(id){
     + '<p id="jfUnplannedNote" class="muted" style="font-size:.72rem;margin-top:.35rem">'+(unplanned
         ? "On — this entry won't push the fund's remaining below $0. It still shows in reports under the fund's category."
         : "Off — counts normally against the fund\\'s budget. Turn this on if the amount would exceed what\\'s left.")+'</p></div>'
-    + '<div id="jfBalanceWrap" class="fgroup'+(unplanned?"":" hidden")+'"><button class="field row" style="cursor:pointer" onclick="jfBalanceToggle(this)">'
+    + '<div id="jfBalanceWrap" class="fgroup"><button class="field row" style="cursor:pointer" onclick="jfBalanceToggle(this)">'
     + '<span id="jfBalanceLbl" style="font-size:.875rem;font-weight:500">Subtract from Available now</span>'
     + '<span id="jfBalanceAdjust" class="toggle'+(balanceAdjustOn?" on":"")+'" data-on="'+(balanceAdjustOn?1:0)+'"><span class="knob"></span></span></button>'
     + '<p id="jfBalanceNote" class="muted" style="font-size:.72rem;margin-top:.35rem">'+(balanceAdjustOn
@@ -2040,7 +2064,7 @@ function jfSave(){
 
   var d = new Date(date+"T00:00:00");
   var balanceEl = document.getElementById("jfBalanceAdjust");
-  var wantsBalanceAdjust = unplanned && balanceEl && balanceEl.getAttribute("data-on")==="1";
+  var wantsBalanceAdjust = balanceEl && balanceEl.getAttribute("data-on")==="1";
   var balanceAdjust = wantsBalanceAdjust ? { y:d.getFullYear(), m:d.getMonth()+1, amount:amount } : null;
   var entry = { id: jEditId || ("j"+Date.now()), name:name, amount:amount, date:date, fundId:fund.id, unplanned:unplanned, category:fund.category, balanceAdjust:balanceAdjust };
   if(balanceAdjust) applyBalanceAdjust(entry);
@@ -2050,6 +2074,7 @@ function jfSave(){
   if(!found) S.journal.push(entry);
 
   persist(); closeModal(); render();
+  showBalanceWarning();
 }
 function jfDelete(){
   if(!jConfirmDel){
@@ -2732,7 +2757,9 @@ var UPDATE_LOG = [
       "Modals auto-focus their first field on desktop/web, so you can start typing or tab through without an extra click.",
       "Fixed a rounding bug: repeated automatic balance adjustments could drift a few fractions of a cent past 2 decimal places over time. Every amount is now snapped to the nearest cent the moment it's entered or calculated, so this can't recur — and reopening an existing entry now displays a clean number even if it was affected before.",
       "Fixed a real bug: restoring a backup made before Bills and Funds were merged into Expenses silently failed to convert them, so bills didn't come back. Restore now converts an old-format backup the same way opening one on a device that had already updated would, and also accepts backups made after the merge, which it had been rejecting outright.",
-      "Fixed a more serious version of the same bug: on the web app, any save made after the Bills/Funds merge appeared to save successfully, but was silently rejected as \"not real data\" the next time the app opened, since the check for a real save was still looking for the old bills field specifically. Data wasn't actually being deleted, but it looked that way after every reload. The check now recognizes both the old and new save shape."
+      "Fixed a more serious version of the same bug: on the web app, any save made after the Bills/Funds merge appeared to save successfully, but was silently rejected as \"not real data\" the next time the app opened, since the check for a real save was still looking for the old bills field specifically. Data wasn't actually being deleted, but it looked that way after every reload. The check now recognizes both the old and new save shape.",
+      "Available now can no longer go negative from an automatic reduction (marking a bill paid, an Unplanned entry) — it's capped at $0 and you're shown a plain warning that the real balance is likely lower than what's displayed.",
+      "The \"Subtract from Available now\" toggle is no longer limited to Unplanned spending — it's offered for any fund-tied entry, on by default, since normal fund spending and Unplanned spending both draw from the same real account and neither should require a separate manual balance edit."
     ]
   },
   {
@@ -2974,12 +3001,13 @@ function paySaveActual(){
   persist(); render();
   openPay(payId, payOcc); // reopen so "amount still owed" and everything else reflects the update
 }
-function paySet(v){ if(payId!==null){ setLeft(payId, v, payOcc); } closeModal(); }
-function payClear(){ if(payId!==null){ setLeft(payId, undefined, payOcc); } closeModal(); }
+function paySet(v){ if(payId!==null){ setLeft(payId, v, payOcc); } closeModal(); showBalanceWarning(); }
+function payClear(){ if(payId!==null){ setLeft(payId, undefined, payOcc); } closeModal(); showBalanceWarning(); }
 function paySave(){
   var inp = document.getElementById("payInput");
   if(payId!==null && inp){ setLeft(payId, num(inp.value), payOcc); }
   closeModal();
+  showBalanceWarning();
 }
 /* --- goal-linked bills: their own pay modal — all-or-nothing, plus a skip-this-month option --- */
 var goalUnpayArmed = false;
@@ -3013,6 +3041,7 @@ function goalBillMarkPaid(){
   createGoalDeposit(b, view.y, view.m, payOcc);
   setLeft(payId, 0, payOcc);
   closeModal();
+  showBalanceWarning();
 }
 function goalBillUnpay(){
   var b = billsList().filter(function(x){return x.id===payId;})[0];
@@ -3051,6 +3080,7 @@ function billSkipToggle(){
     b.skipMonths.push(key);
     setLeft(b.id, undefined, payOcc); // clears "left", reverses any auto-reduce-balance adjustment, persists/renders/reschedules
     closeModal();
+    showBalanceWarning();
   }
 }
 
