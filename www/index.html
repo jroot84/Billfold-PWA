@@ -370,7 +370,8 @@ function seedState(){
     savingsEntries:[],
     remindersOn:false,
     remindDays:3,
-    devOptionsRevealed:false
+    devOptionsRevealed:false,
+    calc:{ start:1000, contrib:100, freq:"monthly", rate:7, years:20 }
   };
 }
 /* ---------- sample data (dev-only "Load sample data") ----------
@@ -468,6 +469,9 @@ if(!S.savingsEntries) S.savingsEntries = [];
 if(S.remindersOn === undefined) S.remindersOn = false;
 if(!S.remindDays) S.remindDays = 3;
 if(S.devOptionsRevealed === undefined) S.devOptionsRevealed = false;
+/* Migrate existing installs: the investing calculator used to be a transient, unsaved
+   global. Bring it into S so it persists going forward. */
+if(!S.calc) S.calc = { start:1000, contrib:100, freq:"monthly", rate:7, years:20 };
 S.savingsEntries = S.savingsEntries.map(function(e){
   var amt = num(e.amount);
   var type = e.type || (amt < 0 ? "withdrawal" : "deposit");
@@ -510,8 +514,7 @@ var calcState = { acc:null, pending:null, entry:"0", justEq:false, history:[] };
 var padState = null;            // separate state for the popup calculator
 var activeCalc = calcState;     // whichever calculator the keypad is driving
 var calcTargetInput = null;     // the input a popup calc will write back to
-/* investment calculator inputs (not part of saved budget data) */
-var calc = { start:1000, contrib:100, freq:"monthly", rate:7, years:20 };
+/* investment calculator inputs now live in S.calc so they persist (see migration near S init) */
 
 /* ---------- derived ---------- */
 function emptyMonth(){ return {balance:0,cards:[0,0,0],left:{},actuals:{}}; }
@@ -1239,11 +1242,13 @@ function billsReportBody(){
   if(reportScope==="month"){
     var data1 = monthDataAt(view.y,view.m);
     billsList().forEach(function(b){ if(dueInMonth(b,view.m) && !isSkipped(b,view.y,view.m)) add(b.category,fullAmountFor(b,data1,1)); });
+    fundsList().forEach(function(f){ if(f.active) add(f.category, num(f.budget)); });
   }else{
     for(var m=1;m<=12;m++){
       var dataM = monthDataAt(view.y,m);
       billsList().forEach(function(b){ if(dueInMonth(b,m) && !isSkipped(b,view.y,m)) add(b.category,fullAmountFor(b,dataM,1)); });
     }
+    fundsList().forEach(function(f){ if(f.active) add(f.category, num(f.budget)*12); });
   }
   var rows = Object.keys(byCat).map(function(c){return {cat:c,v:byCat[c]};}).sort(function(a,b){return b.v-a.v;});
   var total = rows.reduce(function(s,r){return s+r.v;},0);
@@ -1262,7 +1267,7 @@ function billsReportBody(){
   var h = '<section class="card pad">'
     + '<div class="donut-wrap"><div class="donut" style="background:'+donutBg+'"></div>'
     + '<div class="donut-hole"><span class="amt tnum">'+usd(total)+'</span>'
-    + '<span class="cap">'+(reportScope==="month"?"due this month":"planned this year")+'</span></div></div>';
+    + '<span class="cap">'+(reportScope==="month"?"expected this month":"expected this year")+'</span></div></div>';
 
   if(rows.length===0){
     h += '<p class="muted" style="font-size:.9rem">Nothing scheduled for this period.</p>';
@@ -1283,7 +1288,7 @@ function billsReportBody(){
     + '<span class="tnum" style="font-weight:700;color:'+(diff>=0?"var(--pine)":"var(--red)")+'">'
     + (diff>=0 ? usd(diff)+" left over" : usd(-diff)+" over")+'</span></div>'
     + '</section>'
-    + '<p class="muted" style="font-size:.75rem;text-align:center;padding:0 1rem">Based on scheduled amounts for active bills. Paused bills aren\'t counted.</p>';
+    + '<p class="muted" style="font-size:.75rem;text-align:center;padding:0 1rem">Includes active bills at their scheduled amounts and active funds at their monthly budget. Paused bills and funds aren\'t counted.</p>';
   return h;
 }
 function spendingReportBody(){
@@ -1304,7 +1309,45 @@ function savingsReportBody(){
       + '<button class="btn btn-pine" style="width:100%" onclick="openGoalForm(null)">Set a goal</button>'
       + '</section>';
   }
-  var h = '<section class="card">';
+
+  /* Net total + pie breakdown by goal. Entries whose goal was since deleted still count
+     toward the net total (they're grouped as "Other"), matching how the Log tab treats them. */
+  var trackedIds = S.savingsGoals.map(function(g){ return g.id; });
+  var pieRows = S.savingsGoals.map(function(g,i){
+    return { name:g.name, v:savingsTotalFor(g.id), color:CHART_COLORS[i % CHART_COLORS.length] };
+  });
+  var otherTotal = S.savingsEntries.reduce(function(s,e){
+    if(trackedIds.indexOf(e.goalId)>=0) return s;
+    return s + (e.type==="withdrawal" ? -num(e.amount) : num(e.amount));
+  },0);
+  if(otherTotal!==0) pieRows.push({ name:"Other", v:otherTotal, color:"var(--sub)" });
+  var netTotal = pieRows.reduce(function(s,r){ return s+r.v; },0);
+  var pieTotal = pieRows.reduce(function(s,r){ return s+Math.max(0,r.v); },0);
+
+  var stops=[], acc=0;
+  pieRows.forEach(function(r){
+    var val = Math.max(0,r.v);
+    var from = pieTotal>0 ? acc/pieTotal*360 : 0;
+    acc += val;
+    var to = pieTotal>0 ? acc/pieTotal*360 : 0;
+    stops.push(r.color+" "+from+"deg "+to+"deg");
+  });
+  var donutBg = stops.length && pieTotal>0 ? "conic-gradient("+stops.join(",")+")" : "var(--line)";
+
+  var h = '<section class="card pad">'
+    + '<div class="donut-wrap"><div class="donut" style="background:'+donutBg+'"></div>'
+    + '<div class="donut-hole"><span class="amt tnum">'+usd(netTotal)+'</span>'
+    + '<span class="cap">net saved</span></div></div>';
+  h += pieRows.map(function(r){
+    var pct = pieTotal>0 ? Math.max(0,r.v)/pieTotal*100 : 0;
+    return '<div class="row" style="font-size:.8rem;padding:.25rem 0">'
+      + '<span style="display:flex;align-items:center;gap:.5rem;font-weight:600">'
+      + '<span class="cat-dot" style="width:9px;height:9px;background:'+r.color+'"></span>'+esc(r.name)+'</span>'
+      + '<span class="tnum">'+usd(r.v)+' <span class="muted" style="font-size:.72rem">'+Math.round(pct)+'%</span></span></div>';
+  }).join("");
+  h += '</section>';
+
+  h += '<section class="card">';
   S.savingsGoals.forEach(function(g, i){
     var saved = savingsTotalFor(g.id);
     var target = num(g.target);
@@ -1330,6 +1373,19 @@ function savingsReportBody(){
   }
   return h;
 }
+/* Active funds' monthly budgets, summed per category (a category can have more than one
+   fund in theory, though the UI steers toward one). Used to show budget context on the
+   spending report — funds are just a cap on a category, not a separate transaction type,
+   so the actual spending already lives in the journal entries below. */
+function fundBudgetByCategory(scope){
+  var byCat = {};
+  fundsList().forEach(function(f){
+    if(!f.active) return;
+    var monthly = num(f.budget);
+    byCat[f.category] = (byCat[f.category]||0) + (scope==="year" ? monthly*12 : monthly);
+  });
+  return byCat;
+}
 function journalRowsForScope(scope){
   var byCat = {};
   function add(c,v){ byCat[c]=(byCat[c]||0)+v; }
@@ -1340,7 +1396,12 @@ function journalRowsForScope(scope){
     if(scope==="month"){ if(ey===view.y && em===view.m) add(e.category||"Uncategorized", num(e.amount)); }
     else { if(ey===view.y) add(e.category||"Uncategorized", num(e.amount)); }
   });
-  return Object.keys(byCat).map(function(c){ return {cat:c, v:byCat[c]}; }).sort(function(a,b){ return b.v-a.v; });
+  var budgets = fundBudgetByCategory(scope);
+  /* Include categories with a fund budget but no spending yet, so a fresh fund still shows up. */
+  Object.keys(budgets).forEach(function(c){ if(!(c in byCat)) byCat[c] = 0; });
+  return Object.keys(byCat).map(function(c){
+    return { cat:c, v:byCat[c], budget: (c in budgets) ? budgets[c] : null };
+  }).sort(function(a,b){ return b.v-a.v; });
 }
 function donutBgFor(rows,total){
   var stops=[], acc=0;
@@ -1355,12 +1416,24 @@ function donutBgFor(rows,total){
 function categoryListHtml(rows,total){
   if(rows.length===0) return '<p class="muted" style="font-size:.9rem">Nothing logged for this period.</p>';
   return rows.map(function(r){
-    var pct = total>0 ? r.v/total*100 : 0;
+    var hasBudget = r.budget!==null && r.budget!==undefined;
+    if(hasBudget){
+      var over = r.budget>0 && r.v>r.budget;
+      var pct = r.budget>0 ? Math.max(0, Math.min(100, r.v/r.budget*100)) : 0;
+      var barColor = over ? "var(--red)" : catColor(r.cat);
+      return '<div class="report-li">'
+        + '<div class="row"><span style="display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:.875rem">'
+        + '<span class="cat-dot" style="width:9px;height:9px;background:'+catColor(r.cat)+'"></span>'+esc(r.cat)+'</span>'
+        + '<span class="tnum" style="font-size:.875rem"><b style="color:'+(over?"var(--red)":"inherit")+'">'+usd(r.v)+'</b> <span class="muted" style="font-size:.75rem">of '+usd(r.budget)+' budgeted</span></span></div>'
+        + '<div class="cat-bar"><div class="fill" style="width:'+pct+'%;background:'+barColor+'"></div></div>'
+        + '</div>';
+    }
+    var pct2 = total>0 ? r.v/total*100 : 0;
     return '<div class="report-li">'
       + '<div class="row"><span style="display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:.875rem">'
       + '<span class="cat-dot" style="width:9px;height:9px;background:'+catColor(r.cat)+'"></span>'+esc(r.cat)+'</span>'
-      + '<span class="tnum" style="font-size:.875rem"><b>'+usd(r.v)+'</b> <span class="muted" style="font-size:.75rem">'+Math.round(pct)+'%</span></span></div>'
-      + '<div class="cat-bar"><div class="fill" style="width:'+pct+'%;background:'+catColor(r.cat)+'"></div></div>'
+      + '<span class="tnum" style="font-size:.875rem"><b>'+usd(r.v)+'</b> <span class="muted" style="font-size:.75rem">'+Math.round(pct2)+'%</span></span></div>'
+      + '<div class="cat-bar"><div class="fill" style="width:'+pct2+'%;background:'+catColor(r.cat)+'"></div></div>'
       + '</div>';
   }).join("");
 }
@@ -1582,20 +1655,21 @@ function calcKeydown(e){
 
 /* ---------- Investment calculator ---------- */
 function setCalc(key, val){
-  if(key==="freq") calc.freq = val;
-  else calc[key] = num(val);
+  if(key==="freq") S.calc.freq = val;
+  else S.calc[key] = num(val);
+  persist();
   render();
 }
 function projectCalc(){
-  var start = num(calc.start), c = num(calc.contrib), rate = num(calc.rate)/100;
-  var yrs = Math.max(1, Math.min(60, Math.round(num(calc.years)) || 1));
+  var start = num(S.calc.start), c = num(S.calc.contrib), rate = num(S.calc.rate)/100;
+  var yrs = Math.max(1, Math.min(60, Math.round(num(S.calc.years)) || 1));
   var mRate = rate/12;
   var bal = start, contributed = start;
   var balSeries = [start], contribSeries = [start];
   for(var y=1; y<=yrs; y++){
     for(var mo=1; mo<=12; mo++){
       bal = bal*(1+mRate);
-      if(calc.freq==="monthly"){ bal += c; contributed += c; }
+      if(S.calc.freq==="monthly"){ bal += c; contributed += c; }
       else if(mo===12){ bal += c; contributed += c; }
     }
     balSeries.push(bal); contribSeries.push(contributed);
@@ -1634,7 +1708,7 @@ function calcField(label, key, prefix, suffix){
   return '<div class="fgroup"><label class="flabel">'+label+'</label>'
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem">'
     + (prefix?'<span>'+prefix+'</span>':'')
-    + '<input class="tnum" inputmode="decimal" value="'+esc(String(calc[key]))+'" '
+    + '<input class="tnum" inputmode="decimal" value="'+esc(String(S.calc[key]))+'" '
     + 'style="padding:.6rem .25rem;text-align:left;font-size:1rem" '
     + 'onchange="setCalc(\''+key+'\', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()">'
     + (suffix?'<span style="white-space:nowrap">'+suffix+'</span>':'')
@@ -1652,13 +1726,13 @@ function investScreen(){
     + '<div class="grid2">'
     + '<div class="fgroup"><label class="flabel">Contribution</label>'
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
-    + '<input class="tnum" inputmode="decimal" value="'+esc(String(calc.contrib))+'" '
+    + '<input class="tnum" inputmode="decimal" value="'+esc(String(S.calc.contrib))+'" '
     + 'style="padding:.6rem .25rem;text-align:left;font-size:1rem" onchange="setCalc(\'contrib\', this.value)" '
     + 'onkeydown="if(event.key===\'Enter\')this.blur()"></div></div>'
     + '<div class="fgroup"><label class="flabel">How often</label>'
     + '<select class="field" onchange="setCalc(\'freq\', this.value)">'
-    + '<option value="monthly"'+(calc.freq==="monthly"?" selected":"")+'>Every month</option>'
-    + '<option value="yearly"'+(calc.freq==="yearly"?" selected":"")+'>Every year</option>'
+    + '<option value="monthly"'+(S.calc.freq==="monthly"?" selected":"")+'>Every month</option>'
+    + '<option value="yearly"'+(S.calc.freq==="yearly"?" selected":"")+'>Every year</option>'
     + '</select></div>'
     + '</div>'
     + calcField("Estimated annual return", "rate", "", "% / yr")
