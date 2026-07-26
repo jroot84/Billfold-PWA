@@ -355,6 +355,7 @@ function freqText(b){
   return {monthly:"Monthly",even:"Even months",odd:"Odd months"}[b.freq]||"Monthly";
 }
 function catColor(cat){
+  if(cat==="Credit/Debt") return "var(--pine)";
   if(typeof cat==="string" && cat.indexOf("→ ")===0) return "var(--pine)";
   var i = S.categories.indexOf(cat);
   return CHART_COLORS[(i<0?0:i)%CHART_COLORS.length];
@@ -585,6 +586,9 @@ var fundsSort = "name_asc"; // name_asc | pct_desc | cat_asc
 var fundsFilterCategory = null;
 /* Bills screen's equivalent toolbar state. */
 var billsSearchOpen = false, billsSearchQuery = "";
+var monthSearchOpen = false, monthSearchQuery = "";
+var monthSort = "due_default"; // due_default | cat_group | name_asc | amount_desc
+var monthHidePaid = false;
 var billsSort = "cat_group"; // cat_group | due_asc | name_asc | amount_desc
 var billsFilterCategory = null;
 var settingsSubScreen = null;
@@ -690,12 +694,14 @@ function chargeDebt(debtId, amount){
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt || amount<=0) return false;
   debt.balance = num(num(debt.balance) + amount);
+  maybeAutoAdjustDebtPayment(debt);
   return debt.balance>0 && num(debt.payment)<=0;
 }
 function unchargeDebt(debtId, amount){
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt || amount<=0) return;
   debt.balance = Math.max(0, num(num(debt.balance) - amount));
+  maybeAutoAdjustDebtPayment(debt);
 }
 // A payment "method" is "available" (Available Balance, the default) or a debtId from
 // paymentOptions(). These two functions are the one place a bill or Variable-expense payment
@@ -719,6 +725,20 @@ function reversePaymentEffect(y, m, method, amount){
 }
 function debtLinkedBill(debtId){ return S.expenses.filter(function(e){ return e.linkedDebtId===debtId; })[0]; }
 function monthlyRateFor(debt){ return num(debt.apr)/100/12; }
+// Keeps a debt's monthly payment sensible relative to its current balance, called after any
+// balance change: a payment can never exceed what's actually owed (it would just be an
+// overpayment with nowhere to go), so it's clamped down along with the balance. And rather
+// than leave a small fresh balance with no payment at all (needing the "set a payment?"
+// prompt every time), anything under $100 just defaults its payment to the full balance —
+// small enough to reasonably expect paying off in one shot.
+function maybeAutoAdjustDebtPayment(debt){
+  if(!debt) return;
+  var bal = num(debt.balance);
+  if(bal<=0) return; // leave the payment setting alone; dueBills already hides the bill at $0
+  if(num(debt.payment)<=0 && bal<100) debt.payment = bal;
+  else if(num(debt.payment) > bal) debt.payment = bal;
+  syncDebtBill(debt);
+}
 // Keeps the auto-generated Fixed bill in sync with a debt's current name/payment/active state.
 // Creates it the first time a real payment is set; removes it if the payment ever goes back
 // to $0 (nothing to pay yet — e.g. a freshly-added card with no balance).
@@ -729,14 +749,14 @@ function syncDebtBill(debt){
     return;
   }
   if(!bill){
-    bill = { id:"exp_debt_"+Date.now(), type:"fixed", name:debt.name+" payment", amount:num(debt.payment),
-      freq:"monthly", dueDay:debt.dueDay||undefined, category:"→ "+debt.name, active:debt.active!==false,
+    bill = { id:"exp_debt_"+Date.now(), type:"fixed", name:debt.name, amount:num(debt.payment),
+      freq:"monthly", dueDay:debt.dueDay||undefined, category:"Credit/Debt", active:debt.active!==false,
       remindOff:false, linkedDebtId:debt.id };
     S.expenses.push(bill);
   } else {
-    bill.name = debt.name+" payment";
+    bill.name = debt.name;
     bill.amount = num(debt.payment);
-    bill.category = "→ "+debt.name;
+    bill.category = "Credit/Debt";
     bill.active = debt.active!==false;
     bill.dueDay = debt.dueDay||undefined;
   }
@@ -790,6 +810,7 @@ function applyDebtBillPayAt(y, m, billId, newOwed, occ){
     data.debtPrincipalPaid[key] = num(data.debtPrincipalPaid[key]||0) + principal;
   }
   data.left[key] = newVal;
+  maybeAutoAdjustDebtPayment(S.debts.filter(function(d){ return d.id===b.linkedDebtId; })[0]);
 }
 function applyDebtBillPay(billId, newOwed, occ){
   applyDebtBillPayAt(view.y, view.m, billId, newOwed, occ);
@@ -813,12 +834,11 @@ function undoDebtBillPayAt(y, m, billId, occ){
   var totalDue = num(b.amount);
   var alreadyPaid = totalDue - oldOwed;
   if(alreadyPaid>0) S.months[k].balance = num(num(S.months[k].balance) + alreadyPaid);
-  if(principal){
-    var debt = S.debts.filter(function(d){ return d.id===b.linkedDebtId; })[0];
-    if(debt) debt.balance = num(num(debt.balance) + principal);
-  }
+  var debt = S.debts.filter(function(d){ return d.id===b.linkedDebtId; })[0];
+  if(principal && debt) debt.balance = num(num(debt.balance) + principal);
   delete data.debtPrincipalPaid[key];
   delete data.left[key];
+  maybeAutoAdjustDebtPayment(debt);
 }
 function undoDebtBillPay(billId, occ){
   undoDebtBillPayAt(view.y, view.m, billId, occ);
@@ -831,11 +851,13 @@ function applyDebtExtraPayment(debtId, amount){
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt || amount<=0) return;
   debt.balance = Math.max(0, num(num(debt.balance) - amount));
+  maybeAutoAdjustDebtPayment(debt);
 }
 function revertDebtExtraPayment(debtId, amount){
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt || amount<=0) return;
   debt.balance = num(num(debt.balance) + amount);
+  maybeAutoAdjustDebtPayment(debt);
 }
 // Standard amortization projection: months to zero at the current balance, rate, and payment.
 // Returns null if the payment doesn't even cover monthly interest — balance would never shrink.
@@ -994,6 +1016,104 @@ function renderBanner(){
 }
 
 /* ---------- Month screen ---------- */
+var MONTH_SORTS = [
+  ["due_default","Default order"],
+  ["cat_group","Grouped by category"],
+  ["name_asc","Name (A–Z)"],
+  ["amount_desc","Amount: high to low"]
+];
+function monthSortLabel(key){
+  var found = MONTH_SORTS.filter(function(s){ return s[0]===key; })[0];
+  return found ? found[1] : "Default order";
+}
+function openMonthToolbarMenu(){
+  modal("Bills list options",
+    '<ul class="plain">'
+    + '<li><button class="bill-li" style="width:100%;text-align:left" onclick="closeModal();openMonthSearch()">'
+      + '<span class="settings-icon">'+icon("search",18)+'</span>'
+      + '<span style="flex:1"><div class="bill-name">Search</div><div class="bill-cat">By name or category</div></span>'
+      + '</button></li>'
+    + '<li><button class="bill-li" style="width:100%;text-align:left" onclick="closeModal();openMonthSortSheet()">'
+      + '<span class="settings-icon">'+icon("sort",18)+'</span>'
+      + '<span style="flex:1"><div class="bill-name">Sort by</div><div class="bill-cat">'+esc(monthSortLabel(monthSort))+'</div></span>'
+      + '</button></li>'
+    + '<li><button class="bill-li" style="width:100%;text-align:left" onclick="toggleMonthHidePaid()">'
+      + '<span class="settings-icon">'+icon("check",18)+'</span>'
+      + '<span style="flex:1"><div class="bill-name">Hide paid bills</div><div class="bill-cat">'+(monthHidePaid?"On":"Off")+'</div></span>'
+      + '</button></li>'
+    + '</ul>');
+}
+function toggleMonthHidePaid(){ monthHidePaid = !monthHidePaid; closeModal(); render(); }
+function openMonthSearch(){
+  monthSearchOpen = true; render();
+  var el = document.getElementById("monthSearchInput");
+  if(el) el.focus();
+}
+function closeMonthSearch(){ monthSearchOpen = false; monthSearchQuery = ""; render(); }
+function setMonthSearch(input){
+  var pos = input.selectionStart;
+  monthSearchQuery = input.value;
+  render();
+  var el = document.getElementById("monthSearchInput");
+  if(el){ el.focus(); try{ el.setSelectionRange(pos,pos); }catch(e){} }
+}
+function openMonthSortSheet(){
+  modal("Sort by",
+    '<ul class="plain">' + MONTH_SORTS.map(function(s){
+      var on = monthSort===s[0];
+      return '<li><button class="bill-li" style="width:100%;text-align:left" onclick="setMonthSort(\''+s[0]+'\')">'
+        + '<span style="flex:1;font-weight:'+(on?"700":"500")+';color:'+(on?"var(--pine)":"var(--ink)")+'">'+s[1]+'</span>'
+        + (on ? icon("check",18) : '') + '</button></li>';
+    }).join("") + '</ul>');
+}
+function setMonthSort(key){ monthSort = key; closeModal(); render(); }
+// A semimonthly bill counts as fully paid only once both occurrences are settled; skipped
+// bills are never treated as "paid" here, so Hide Paid doesn't also hide skipped ones.
+function isBillFullyPaid(b, data){
+  if(isSkipped(b, view.y, view.m)) return false;
+  if(b.freq==="semimonthly") return leftOf(b,data,1)===0 && leftOf(b,data,2)===0;
+  return leftOf(b,data,1)===0;
+}
+function monthVisibleBills(bills, data){
+  var list = bills.slice();
+  if(monthHidePaid) list = list.filter(function(b){ return !isBillFullyPaid(b, data); });
+  var q = monthSearchQuery.trim().toLowerCase();
+  if(q){
+    list = list.filter(function(b){
+      return (b.name||"").toLowerCase().indexOf(q)>=0 || (b.category||"").toLowerCase().indexOf(q)>=0;
+    });
+  }
+  if(monthSort==="name_asc"){
+    list.sort(function(a,b){ return (a.name||"").localeCompare(b.name||""); });
+  } else if(monthSort==="amount_desc"){
+    list.sort(function(a,b){ return fullAmountFor(b,data,1)-fullAmountFor(a,data,1); });
+  }
+  return list;
+}
+// Renders the bill list either as one flat list (default order or the two simple sorts
+// above) or grouped into per-category sections, matching how the Bills tab groups things.
+function monthBillListHtml(bills, data){
+  if(monthSort!=="cat_group"){
+    return '<ul class="plain">' + bills.reduce(function(acc,b){ return acc.concat(monthBillRows(b,data)); }, []).join("") + '</ul>';
+  }
+  var groups = S.categories.map(function(c){
+    return {cat:c, bills:bills.filter(function(b){return !b.linkedGoalId && !b.linkedDebtId && b.category===c;})};
+  }).filter(function(g){return g.bills.length>0;});
+  var goalGroups = {}, goalOrder = [];
+  bills.filter(function(b){return b.linkedGoalId || b.linkedDebtId;}).forEach(function(b){
+    var label = b.category;
+    if(!goalGroups[label]){ goalGroups[label] = []; goalOrder.push(label); }
+    goalGroups[label].push(b);
+  });
+  goalOrder.forEach(function(label){ groups.push({cat:label, bills:goalGroups[label]}); });
+  var stray = bills.filter(function(b){return !b.linkedGoalId && !b.linkedDebtId && S.categories.indexOf(b.category)<0;});
+  if(stray.length) groups.push({cat:"Uncategorized", bills:stray});
+  return groups.map(function(g){
+    return '<div class="list-head" style="margin-top:.9rem"><h3 style="font-size:.8rem;font-weight:700;display:flex;align-items:center;gap:.5rem">'
+      + '<span class="cat-dot" style="background:'+catColor(g.cat)+'"></span>'+esc(g.cat)+'</h3></div>'
+      + '<ul class="plain">' + g.bills.reduce(function(acc,b){ return acc.concat(monthBillRows(b,data)); }, []).join("") + '</ul>';
+  }).join("");
+}
 function monthScreen(){
   var data = md(), bills = dueBills();
   var countable = bills.filter(function(b){ return !isSkipped(b, view.y, view.m); });
@@ -1051,9 +1171,43 @@ function monthScreen(){
     + '<span class="muted" style="font-size:.75rem">tap a bill to update</span></div>';
   if(bills.length===0){
     h += '<p class="muted" style="padding:0 1rem .5rem;font-size:.9rem">No bills scheduled this month.</p>'
-      + '<button class="btn btn-pine" style="width:calc(100% - 2rem);margin:0 1rem 1rem" onclick="billsSubMode=\'bills\';go(\'bills\');openExpenseForm(null,\'fixed\')">+ Add a bill</button>';
+      + '<button class="btn btn-pine" style="width:calc(100% - 2rem);margin:0 1rem 1rem" onclick="billsSubMode=\'bills\';go(\'bills\');openExpenseForm(null,\'fixed\')">+ Add a bill</button>'
+      + '</section>';
+    return h;
   }
-  h += '<ul class="plain">' + bills.reduce(function(acc,b){ return acc.concat(monthBillRows(b,data)); }, []).join("") + '</ul></section>';
+
+  var chips = [];
+  if(monthHidePaid) chips.push(["Hiding paid", "toggleMonthHidePaid()"]);
+  if(monthSearchQuery.trim()) chips.push(['Search: "'+esc(monthSearchQuery.trim())+'"', "closeMonthSearch()"]);
+  if(chips.length){
+    h += '<div style="padding:0 1rem;display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.6rem">' + chips.map(function(c){
+      return '<button class="calc-chip on" style="display:flex;align-items:center;gap:.3rem" onclick="'+c[1]+'">'+c[0]+' '+icon("x",12)+'</button>';
+    }).join("") + '</div>';
+  }
+
+  var moreBtn = '<button class="btn-round" aria-label="Search, sort, and hide paid bills" style="flex:none;padding:.4rem" onclick="openMonthToolbarMenu()">'+icon("more",16)+'</button>';
+  var listHeaderLeft;
+  if(monthSearchOpen){
+    listHeaderLeft = '<div class="field" style="display:flex;align-items:center;gap:.4rem;flex:1;min-width:0;margin:0;padding:0 .4rem 0 .6rem">'
+      + '<span style="color:var(--sub);display:flex;flex:none">'+icon("search",14)+'</span>'
+      + '<input id="monthSearchInput" style="flex:1;min-width:0;border:none;background:none;padding:.4rem 0;font-weight:500;font-size:.85rem" '
+      + 'placeholder="Search bills…" value="'+esc(monthSearchQuery)+'" oninput="setMonthSearch(this)">'
+      + '<button aria-label="Cancel search" style="color:var(--sub);padding:.2rem" onclick="closeMonthSearch()">'+icon("x",14)+'</button>'
+      + '</div>';
+  } else {
+    listHeaderLeft = '<span class="muted" style="font-size:.75rem;padding-left:1rem">'
+      + (monthSort==="cat_group" ? "By category" : (monthSort==="due_default" ? "Default order" : "Sorted: "+esc(monthSortLabel(monthSort)))) + '</span>';
+  }
+  h += '<div class="row" style="margin-bottom:.4rem;padding-right:1rem">' + listHeaderLeft
+    + '<div style="display:flex;gap:.4rem;align-items:center;flex:none">' + moreBtn + '</div>'
+    + '</div>';
+
+  var visible = monthVisibleBills(bills, data);
+  if(visible.length===0){
+    h += '<p class="muted" style="padding:0 1rem 1rem;font-size:.9rem">Nothing matches the current search'+(monthHidePaid?" (or everything left is paid)":"")+'.</p></section>';
+    return h;
+  }
+  h += monthBillListHtml(visible, data) + '</section>';
   return h;
 }
 function monthBillRow(b, data, occ, subtitle){
@@ -1069,8 +1223,10 @@ function monthBillRow(b, data, occ, subtitle){
   return '<li><div class="bill-li">'
     + '<button class="checkbtn'+(paid?" paid":"")+(skipped?" skipped":"")+'" aria-label="'+checkAria+'" onclick="'+checkOnclick+'">'+(skipped?icon("x",13):(paid?icon("check",15):""))+'</button>'
     + '<button class="bill-main" onclick="'+payFn+'(\''+b.id+'\', '+occ+')">'
-    + '<div><div class="bill-name'+(paid?" done":"")+'">'+esc(b.name)+(linked?' <span style="font-size:.7rem;font-weight:600;color:var(--pine)">→ goal</span>':'')+(b.linkedDebtId?' <span style="font-size:.7rem;font-weight:600;color:var(--pine)">→ debt</span>':'')+(b.type==="variable"&&!paid?' <span style="font-size:.7rem;font-weight:600;color:var(--sub)">est.</span>':'')+'</div>'
-    + '<div class="bill-cat"><span class="cat-dot" style="background:'+catColor(b.category)+'"></span>'+esc(b.category)+(subtitle?' · '+subtitle:'')+'</div></div>'
+    + '<div><div class="bill-name'+(paid?" done":"")+'">'+esc(b.name)+(linked?' <span style="font-size:.7rem;font-weight:600;color:var(--pine)">→ goal</span>':'')+(b.type==="variable"&&!paid?' <span style="font-size:.7rem;font-weight:600;color:var(--sub)">est.</span>':'')+'</div>'
+    + '<div class="bill-cat">'+(monthSort==="cat_group"
+        ? (subtitle||'')
+        : '<span class="cat-dot" style="background:'+catColor(b.category)+'"></span>'+esc(b.category)+(subtitle?' · '+subtitle:''))+'</div></div>'
     + '<div class="bill-amt"><div class="due tnum">'+usd(full)+'</div>'
     + '<div class="status tnum" style="color:'+statusColor+'">'+statusText+'</div></div>'
     + '</button>'
@@ -1217,7 +1373,8 @@ function billsSortEntries(list){
   return sorted;
 }
 function billRow(b){
-  return '<li><button class="bill-li" style="width:100%;text-align:left;opacity:'+(b.active?1:.5)+'" onclick="openExpenseForm(\''+b.id+'\')">'
+  var openFn = b.linkedDebtId ? "openDebtForm('"+b.linkedDebtId+"')" : "openExpenseForm('"+b.id+"')";
+  return '<li><button class="bill-li" style="width:100%;text-align:left;opacity:'+(b.active?1:.5)+'" onclick="'+openFn+'">'
     + '<div style="flex:1"><div class="bill-name">'+esc(b.name)
     + (b.active?'':' <span style="font-size:.7rem;font-weight:500;padding:.1rem .35rem;border-radius:.25rem;background:var(--line);color:var(--sub)">Paused</span>')
     + (b.type==="variable"?' <span style="font-size:.7rem;font-weight:600;color:var(--sub)">est.</span>':'')
@@ -3557,7 +3714,7 @@ function dtSave(){
   var found = false;
   S.debts = S.debts.map(function(x){ if(x.id===debt.id){ found=true; return debt; } return x; });
   if(!found) S.debts.push(debt);
-  syncDebtBill(debt);
+  maybeAutoAdjustDebtPayment(debt);
   persist(); closeModal(); render();
 }
 function dtDelete(){
