@@ -349,6 +349,49 @@ function monthlyEq(b){
   if(b.freq==="yearly") return a/12;
   return a;
 }
+/* ---------- Income projection ----------
+   Informational only — this never changes Available now or any bill math, it just powers the
+   income-vs-spending comparisons already in Reports and Setup. Two modes: a flat monthly
+   number you type directly (the original, simplest option — still the default for existing
+   installs), or a projected total from your actual paycheck amount, frequency, and the last
+   date you were paid. Weekly and biweekly get a real day-by-day projection, since those are
+   the schedules where some months land an extra paycheck; semimonthly and monthly don't have
+   that phenomenon, so they just use a flat per-month figure. */
+var PAY_FREQUENCIES = [
+  ["weekly","Every week"],
+  ["biweekly","Every 2 weeks"],
+  ["semimonthly","Twice a month"],
+  ["monthly","Once a month"]
+];
+function payFrequencyLabel(key){
+  var found = PAY_FREQUENCIES.filter(function(f){ return f[0]===key; })[0];
+  return found ? found[1] : "Every 2 weeks";
+}
+function paychecksInMonth(y, m){
+  var freq = S.payFrequency;
+  if(freq==="semimonthly") return 2;
+  if(freq==="monthly") return 1;
+  if(freq!=="weekly" && freq!=="biweekly") return 0;
+  var last = new Date(S.lastPaycheckDate+"T00:00:00");
+  if(isNaN(last)) return 0;
+  var interval = freq==="weekly" ? 7 : 14;
+  var start = new Date(y, m-1, 1);
+  var end = new Date(y, m, 0);
+  var d = new Date(last);
+  var diffDays = Math.round((start-d)/86400000);
+  var steps = Math.floor(diffDays/interval);
+  d.setDate(d.getDate()+steps*interval);
+  while(d<start) d.setDate(d.getDate()+interval);
+  var count = 0;
+  while(d<=end){ count++; d.setDate(d.getDate()+interval); }
+  return count;
+}
+// The one place anything in the app should read "income" from — decides flat vs. paycheck
+// projection so every caller (Reports, Setup) automatically benefits from either mode.
+function monthlyIncomeFor(y, m){
+  if(S.incomeMode==="paycheck" && num(S.paycheckAmount)>0 && S.lastPaycheckDate) return num(S.paycheckAmount) * paychecksInMonth(y, m);
+  return num(S.income);
+}
 function freqText(b){
   if(b.freq==="yearly") return "Every "+MS[(b.month||1)-1];
   if(b.freq==="semimonthly") return "Twice a month"+((b.dueDay&&b.dueDay2)?" (days "+b.dueDay+" & "+b.dueDay2+")":"");
@@ -368,6 +411,10 @@ function seedState(){
   return {
     version:1,
     income:0,
+    incomeMode:"flat",
+    paycheckAmount:0,
+    payFrequency:"biweekly",
+    lastPaycheckDate:"",
     oneTimeName:"One-time expense",
     categories:[],
     expenses:[],
@@ -495,6 +542,10 @@ if(S.backupRemindersOn === undefined) S.backupRemindersOn = true;
 if(!S.backupReminderDays) S.backupReminderDays = 14;
 if(!S.hiddenTabs) S.hiddenTabs = [];
 if(!S.debts) S.debts = [];
+if(!S.incomeMode) S.incomeMode = "flat";
+if(S.paycheckAmount===undefined) S.paycheckAmount = 0;
+if(!S.payFrequency) S.payFrequency = "biweekly";
+if(S.lastPaycheckDate===undefined) S.lastPaycheckDate = "";
 if(!S._migratedDebtBillsRemoved){
   var oldDebtBillIds = S.expenses.filter(function(e){ return !!e.linkedDebtId; }).map(function(e){ return e.id; });
   if(oldDebtBillIds.length){
@@ -582,9 +633,12 @@ migrateExpenses();
 migrateJournalEntries();
 var view = { screen:"month", y:(new Date()).getFullYear(), m:(new Date()).getMonth()+1 };
 var payId = null, payOcc = 1, editId = null, confirmDel = false, confirmReset = false, pickerYear = null, reportScope = "month";
+// Spending/Savings-only lookback period — separate from reportScope, which stays tied to
+// "current reality" for Bills/Debts. month|year|last3|last6|last12|custom.
+var histPeriod = "month", histCustomY = null, histCustomM = null;
 var trackMode = "journal";
 var billsSubMode = "bills";
-var calcSubMode = "basic", reportSubMode = "bills";
+var calcSubMode = "basic", reportSubMode = null;
 var jEditId = null, jConfirmDel = false, sEditId = null, sConfirmDel = false;
 /* Spending screen's search/sort/filter toolbar state — transient UI state, not saved with app data. */
 var journalSearchOpen = false, journalSearchQuery = "";
@@ -1422,7 +1476,7 @@ function billsSection(){
   var activeFunds = fundsList().filter(function(f){return f.active;});
   var fundsTotal = activeFunds.reduce(function(s,f){return s+num(f.budget);},0);
   var typical = active.reduce(function(s,b){return s+monthlyEq(b);},0) + fundsTotal;
-  var income = num(S.income);
+  var income = monthlyIncomeFor(view.y, view.m);
   var pct = income>0 ? Math.round(typical/income*100) : null;
 
   var h = '<section class="card pad" style="padding:.85rem 1rem">';
@@ -1696,7 +1750,7 @@ function toolsRow(key, title, subtitle, iconName){
     + '<span style="color:var(--sub);flex:none">'+icon("right",18)+'</span>'
     + '</button></li>';
 }
-function openToolsSection(key){ toolsSubScreen = key; window.scrollTo(0,0); render(); }
+function openToolsSection(key){ toolsSubScreen = key; if(key==="reports") reportSubMode = null; window.scrollTo(0,0); render(); }
 function closeToolsSection(){ toolsSubScreen = null; window.scrollTo(0,0); render(); }
 function toolsBackHeader(title){
   return '<div class="row" style="margin-bottom:.75rem">'
@@ -1712,9 +1766,8 @@ function toolsListScreen(){
 }
 function reportsScreen(){
   if(!toolsSubScreen) return toolsListScreen();
-  var titles = {reports:"Reports", calc:"Calculator"};
-  var body = toolsSubScreen==="calc" ? calcSection() : reportsSection();
-  return toolsBackHeader(titles[toolsSubScreen]) + body;
+  if(toolsSubScreen==="calc") return toolsBackHeader("Calculator") + calcSection();
+  return reportsSection(); // Reports supplies its own header — hub list vs. a drilled-into report
 }
 function setCalcSubMode(m){ calcSubMode = m; render(); }
 function calcSection(){
@@ -1727,29 +1780,59 @@ function calcSection(){
     + '</div></div>';
   return seg + (isInv ? investScreen() : calcInlineScreen());
 }
-function setReportSubMode(m){ reportSubMode = m; render(); }
-function reportsSection(){
-  var pStyle = "padding:.28rem .5rem;font-size:.76rem";
-  var subSeg = '<div class="seg" style="margin:0">'
-    + '<button style="'+pStyle+'" class="'+(reportSubMode==="bills"?"on":"")+'" onclick="setReportSubMode(\'bills\')">Bills</button>'
-    + '<button style="'+pStyle+'" class="'+(reportSubMode==="spending"?"on":"")+'" onclick="setReportSubMode(\'spending\')">Spending</button>'
-    + '<button style="'+pStyle+'" class="'+(reportSubMode==="savings"?"on":"")+'" onclick="setReportSubMode(\'savings\')">Savings</button>'
-    + (S.debts.length ? '<button style="'+pStyle+'" class="'+(reportSubMode==="debts"?"on":"")+'" onclick="setReportSubMode(\'debts\')">Debts</button>' : '')
+var REPORT_SECTIONS = [
+  ["bills","Bills","What you can expect to spend","list"],
+  ["spending","Spending","Where your money's actually going","pie"],
+  ["savings","Savings","Track progress toward your goals","trend"]
+];
+function reportRow(key, title, subtitle, iconName){
+  return '<li><button class="bill-li" style="width:100%;text-align:left;background:none;border:none;cursor:pointer" onclick="openReportSection(\''+key+'\')">'
+    + '<span class="settings-icon">'+icon(iconName,18)+'</span>'
+    + '<span style="flex:1;min-width:0">'
+    + '<div class="bill-name">'+esc(title)+'</div>'
+    + (subtitle ? '<div class="bill-cat" style="margin-top:.15rem">'+esc(subtitle)+'</div>' : '')
+    + '</span>'
+    + '<span style="color:var(--sub);flex:none">'+icon("right",18)+'</span>'
+    + '</button></li>';
+}
+function openReportSection(key){ reportSubMode = key; window.scrollTo(0,0); render(); }
+function closeReportSection(){ reportSubMode = null; window.scrollTo(0,0); render(); }
+function reportsHubBackHeader(title){
+  return '<div class="row" style="margin-bottom:.75rem">'
+    + '<button class="btn-round settings-back" aria-label="Back to Reports" onclick="closeReportSection()">'+icon("left",20)+'</button>'
+    + '<h2 style="flex:1;text-align:center;font-size:1rem;font-weight:700;margin:0">'+esc(title)+'</h2>'
+    + '<span class="settings-back"></span>'
     + '</div>';
+}
+function reportsSection(){
+  // Hub: pick which report to view — mirrors the Tools tab's own hub-list pattern, so Reports
+  // doesn't have to cram a type toggle and a scope toggle into one crowded header.
+  if(!reportSubMode){
+    var sections = REPORT_SECTIONS.slice();
+    if(S.debts.length) sections.push(["debts","Debts","Balances across every card and loan","db"]);
+    return toolsBackHeader("Reports") + '<section class="card"><ul class="plain">'
+      + sections.map(function(s){ return reportRow(s[0], s[1], s[2], s[3]); }).join("")
+      + '</ul></section>';
+  }
+  // Drilled into a specific report: its own back header (to the Reports hub, not all the way
+  // to Tools) plus the Month/Year scope toggle where it applies.
+  var titles = {bills:"Bills report", spending:"Spending report", savings:"Savings report", debts:"Debts report"};
+  var pStyle = "padding:.28rem .5rem;font-size:.76rem";
   var scopeSeg = "";
-  if(reportSubMode!=="savings" && reportSubMode!=="debts"){
-    scopeSeg = '<div class="seg" style="margin:0">'
+  if(reportSubMode==="bills"){
+    scopeSeg = '<div class="row" style="margin-bottom:1rem"><div class="seg" style="margin:0">'
       + '<button style="'+pStyle+'" class="'+(reportScope==="month"?"on":"")+'" onclick="reportScope=\'month\';render()">'+MS[view.m-1]+' '+view.y+'</button>'
       + '<button style="'+pStyle+'" class="'+(reportScope==="year"?"on":"")+'" onclick="reportScope=\'year\';render()">'+view.y+'</button>'
-      + '</div>';
+      + '</div></div>';
   }
   // Adding goals now lives in Settings → Setup (and the first-run onboarding wizard). Reports still
   // lets you tap a goal card to edit it, and still nudges toward Settings if none exist yet.
-  var row = '<div class="row" style="flex-wrap:wrap;row-gap:.5rem;margin-bottom:1rem">' + subSeg + scopeSeg + '</div>';
-  if(reportSubMode==="spending") return row + spendingReportBody();
-  if(reportSubMode==="savings") return row + savingsReportBody();
-  if(reportSubMode==="debts" && S.debts.length) return row + debtsReportBody();
-  return row + billsReportBody();
+  var body;
+  if(reportSubMode==="spending") body = spendingReportBody();
+  else if(reportSubMode==="savings") body = savingsReportBody();
+  else if(reportSubMode==="debts" && S.debts.length) body = debtsReportBody();
+  else body = billsReportBody();
+  return reportsHubBackHeader(titles[reportSubMode]||"Report") + scopeSeg + body;
 }
 function billsReportBody(){
   var byCat = {};
@@ -1767,7 +1850,9 @@ function billsReportBody(){
   }
   var rows = Object.keys(byCat).map(function(c){return {cat:c,v:byCat[c]};}).sort(function(a,b){return b.v-a.v;});
   var total = rows.reduce(function(s,r){return s+r.v;},0);
-  var income = reportScope==="month" ? num(S.income) : num(S.income)*12;
+  var income;
+  if(reportScope==="month") income = monthlyIncomeFor(view.y, view.m);
+  else { income = 0; for(var im=1; im<=12; im++) income += monthlyIncomeFor(view.y, im); }
 
   /* donut via conic-gradient */
   var stops=[], acc=0;
@@ -1807,12 +1892,17 @@ function billsReportBody(){
   return h;
 }
 function spendingReportBody(){
-  var jRows = journalRowsForScope(reportScope);
+  var period = histMonthsAndLabel();
+  var jRows = journalRowsForScope(period.months);
   var jTotal = jRows.reduce(function(s,r){ return s+r.v; },0);
-  var h = '<section class="card pad">'
+  var h = '<button class="field row" style="cursor:pointer;margin-bottom:.75rem" onclick="openHistPeriodSheet()">'
+    + '<span style="font-size:.85rem;font-weight:600">'+esc(period.label)+'</span>'
+    + '<span style="color:var(--sub);display:flex;align-items:center;gap:.25rem;font-size:.8rem">Change '+icon("right",14)+'</span>'
+    + '</button>'
+    + '<section class="card pad">'
     + '<div class="donut-wrap"><div class="donut" style="background:'+donutBgFor(jRows,jTotal)+'"></div>'
     + '<div class="donut-hole"><span class="amt tnum">'+usd(jTotal)+'</span>'
-    + '<span class="cap">'+(reportScope==="month"?"logged this month":"logged this year")+'</span></div></div>'
+    + '<span class="cap">logged</span></div></div>'
     + categoryListHtml(jRows,jTotal)
     + '</section>';
   return h;
@@ -1825,8 +1915,33 @@ function savingsReportBody(){
       + '</section>';
   }
 
+  // Period-scoped activity — separate from the all-time goal progress below, since a goal's
+  // saved total is inherently cumulative and shouldn't reset with the period picker.
+  var period = histMonthsAndLabel();
+  var inRange = {};
+  period.months.forEach(function(pair){ inRange[pair[0]+"-"+pair[1]] = true; });
+  var deposited = 0, withdrawn = 0;
+  S.savingsEntries.forEach(function(e){
+    var d = new Date(e.date+"T00:00:00");
+    if(isNaN(d)) return;
+    if(!inRange[d.getFullYear()+"-"+(d.getMonth()+1)]) return;
+    if(e.type==="withdrawal") withdrawn += num(e.amount); else deposited += num(e.amount);
+  });
+  var h = '<button class="field row" style="cursor:pointer;margin-bottom:.75rem" onclick="openHistPeriodSheet()">'
+    + '<span style="font-size:.85rem;font-weight:600">'+esc(period.label)+'</span>'
+    + '<span style="color:var(--sub);display:flex;align-items:center;gap:.25rem;font-size:.8rem">Change '+icon("right",14)+'</span>'
+    + '</button>'
+    + '<section class="card pad">'
+    + '<div class="row"><span class="muted" style="font-size:.85rem">Deposited</span><span class="tnum" style="font-weight:700;color:var(--pine)">'+usd(deposited)+'</span></div>'
+    + (withdrawn ? '<div class="row" style="margin-top:.3rem"><span class="muted" style="font-size:.85rem">Withdrawn</span><span class="tnum" style="font-weight:700;color:var(--red)">'+usd(withdrawn)+'</span></div>' : '')
+    + '<div class="divider" style="margin:.6rem 0"></div>'
+    + '<div class="row"><span style="font-weight:600;font-size:.9rem">Net for this period</span><span class="tnum" style="font-weight:700">'+usd(deposited-withdrawn)+'</span></div>'
+    + '</section>';
+
   /* Net total + pie breakdown by goal. Entries whose goal was since deleted still count
-     toward the net total (they're grouped as "Other"), matching how the Log tab treats them. */
+     toward the net total (they're grouped as "Other"), matching how the Log tab treats them.
+     This part is all-time and unaffected by the period picker above — a goal's progress is
+     cumulative by nature. */
   var trackedIds = S.savingsGoals.map(function(g){ return g.id; });
   var pieRows = S.savingsGoals.map(function(g,i){
     return { name:g.name, v:savingsTotalFor(g.id), color:CHART_COLORS[i % CHART_COLORS.length] };
@@ -1849,7 +1964,8 @@ function savingsReportBody(){
   });
   var donutBg = stops.length && pieTotal>0 ? "conic-gradient("+stops.join(",")+")" : "var(--line)";
 
-  var h = '<section class="card pad">'
+  h += '<section class="card pad" style="margin-top:.9rem">'
+    + '<h2 class="eyebrow">All time</h2>'
     + '<div class="donut-wrap"><div class="donut" style="background:'+donutBg+'"></div>'
     + '<div class="donut-hole"><span class="amt tnum">'+usd(netTotal)+'</span>'
     + '<span class="cap">net saved</span></div></div>';
@@ -1937,26 +2053,94 @@ function debtsReportBody(){
    fund in theory, though the UI steers toward one). Used to show budget context on the
    spending report — funds are just a cap on a category, not a separate transaction type,
    so the actual spending already lives in the journal entries below. */
-function fundBudgetByCategory(scope){
+/* ---------- Spending/Savings lookback period ----------
+   Bills and Debts reports are snapshots of current reality (what's configured right now), so
+   they stay tied to reportScope and the currently-viewed month. Spending and Savings are logs
+   of things that actually happened, so they get their own independent period picker instead —
+   any single past month, a whole year, a trailing window, or an arbitrary month/year via
+   "Custom". Returns the list of [y,m] pairs to include and a label to display. */
+function histMonthsAndLabel(){
+  var y = view.y, m = view.m;
+  if(histPeriod==="year") return { months: monthRange(y,1,y,12), label: String(y) };
+  if(histPeriod==="last3" || histPeriod==="last6" || histPeriod==="last12"){
+    var n = histPeriod==="last3" ? 3 : (histPeriod==="last6" ? 6 : 12);
+    var months = [], cy=y, cm=m;
+    for(var i=0;i<n;i++){ months.unshift([cy,cm]); cm--; if(cm<1){ cm=12; cy--; } }
+    return { months: months, label: "Last "+n+" months" };
+  }
+  if(histPeriod==="custom"){
+    if(histCustomM) return { months:[[histCustomY,histCustomM]], label: MS[histCustomM-1]+" "+histCustomY };
+    return { months: monthRange(histCustomY,1,histCustomY,12), label: String(histCustomY) };
+  }
+  return { months:[[y,m]], label: MS[m-1]+" "+y };
+}
+function monthRange(y1,m1,y2,m2){
+  var months = [], y=y1, m=m1;
+  while(y<y2 || (y===y2 && m<=m2)){ months.push([y,m]); m++; if(m>12){ m=1; y++; } }
+  return months;
+}
+function histPeriodLabel(key){
+  return { month:"This month", year:"This year", last3:"Last 3 months", last6:"Last 6 months", last12:"Last 12 months" }[key] || histMonthsAndLabel().label;
+}
+function openHistPeriodSheet(){
+  var opts = [["month","This month"],["year","This year"],["last3","Last 3 months"],["last6","Last 6 months"],["last12","Last 12 months"]];
+  modal("Time period",
+    '<ul class="plain">' + opts.map(function(o){
+      var on = histPeriod===o[0];
+      return '<li><button class="bill-li" style="width:100%;text-align:left" onclick="setHistPeriod(\''+o[0]+'\')">'
+        + '<span style="flex:1;font-weight:'+(on?"700":"500")+';color:'+(on?"var(--pine)":"var(--ink)")+'">'+o[1]+'</span>'
+        + (on ? icon("check",18) : '') + '</button></li>';
+    }).join("")
+    + '<li><button class="bill-li" style="width:100%;text-align:left" onclick="openHistCustomPicker()">'
+      + '<span style="flex:1;font-weight:'+(histPeriod==="custom"?"700":"500")+';color:'+(histPeriod==="custom"?"var(--pine)":"var(--ink)")+'">Custom month or year…</span>'
+      + (histPeriod==="custom" ? icon("check",18) : '') + '</button></li>'
+    + '</ul>');
+}
+function setHistPeriod(key){ histPeriod = key; closeModal(); render(); }
+function openHistCustomPicker(){
+  var y = histCustomY || view.y;
+  var m = (histCustomM===undefined ? view.m : histCustomM);
+  var yearOpts = []; for(var yy=view.y; yy>=view.y-9; yy--) yearOpts.push(yy);
+  modal("Choose a month or year",
+    '<div class="fgroup"><label class="flabel">Year</label>'
+    + '<select id="histYearSel" class="field">'
+    + yearOpts.map(function(yy){ return '<option value="'+yy+'"'+(yy===y?" selected":"")+'>'+yy+'</option>'; }).join("")
+    + '</select></div>'
+    + '<div class="fgroup"><label class="flabel">Month</label>'
+    + '<select id="histMonthSel" class="field">'
+    + '<option value="">Whole year</option>'
+    + MS.map(function(mn,i){ return '<option value="'+(i+1)+'"'+((m||0)===i+1?" selected":"")+'>'+mn+'</option>'; }).join("")
+    + '</select></div>'
+    + '<button class="btn btn-pine" style="width:100%;margin-top:1rem;padding:.8rem" onclick="applyHistCustom()">View</button>');
+}
+function applyHistCustom(){
+  var yEl = document.getElementById("histYearSel"), mEl = document.getElementById("histMonthSel");
+  histCustomY = num(yEl.value);
+  histCustomM = mEl.value ? parseInt(mEl.value,10) : null;
+  histPeriod = "custom";
+  closeModal(); render();
+}
+function fundBudgetByCategory(months){
   var byCat = {};
   fundsList().forEach(function(f){
     if(!f.active) return;
     var monthly = num(f.budget);
-    byCat[f.category] = (byCat[f.category]||0) + (scope==="year" ? monthly*12 : monthly);
+    byCat[f.category] = (byCat[f.category]||0) + monthly*months.length;
   });
   return byCat;
 }
-function journalRowsForScope(scope){
+function journalRowsForScope(months){
+  var inRange = {};
+  months.forEach(function(pair){ inRange[pair[0]+"-"+pair[1]] = true; });
   var byCat = {};
   function add(c,v){ byCat[c]=(byCat[c]||0)+v; }
   S.journal.forEach(function(e){
     var d = new Date(e.date+"T00:00:00");
     if(isNaN(d)) return;
     var ey=d.getFullYear(), em=d.getMonth()+1;
-    if(scope==="month"){ if(ey===view.y && em===view.m) add(e.category||"Uncategorized", num(e.amount)); }
-    else { if(ey===view.y) add(e.category||"Uncategorized", num(e.amount)); }
+    if(inRange[ey+"-"+em]) add(e.category||"Uncategorized", num(e.amount));
   });
-  var budgets = fundBudgetByCategory(scope);
+  var budgets = fundBudgetByCategory(months);
   /* Include categories with a fund budget but no spending yet, so a fresh fund still shows up. */
   Object.keys(budgets).forEach(function(c){ if(!(c in byCat)) byCat[c] = 0; });
   return Object.keys(byCat).map(function(c){
@@ -3575,6 +3759,48 @@ function backupDetailCard(){
       + '<p class="muted" style="font-size:.72rem;margin-top:.6rem">Also nudges early if you\'ve logged a lot of new bills, spending, or savings entries since your last backup — whichever comes first.</p>'
       : '');
 }
+// Flat amount vs. regular paycheck — mirrors monthlyIncomeFor's own two modes so the Setup
+// page and every report stay in sync automatically.
+function incomeSectionHtml(){
+  var mode = S.incomeMode || "flat";
+  var h = '<div class="seg" style="width:100%;margin-bottom:.75rem">'
+    + '<button class="'+(mode==="flat"?"on":"")+'" onclick="setIncomeMode(\'flat\')">Flat amount</button>'
+    + '<button class="'+(mode==="paycheck"?"on":"")+'" onclick="setIncomeMode(\'paycheck\')">Regular paycheck</button>'
+    + '</div>';
+  if(mode==="paycheck"){
+    var count = paychecksInMonth(view.y, view.m);
+    var proj = monthlyIncomeFor(view.y, view.m);
+    h += '<div class="grid2">'
+      + '<div class="fgroup"><label class="flabel">Paycheck amount (take-home)</label>'
+      + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
+      + '<input id="incPaycheck" class="tnum" inputmode="decimal" value="'+(S.paycheckAmount?num(S.paycheckAmount):"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem" onchange="saveIncomeFields()">'+calcBtn()+'</div></div>'
+      + '<div class="fgroup"><label class="flabel">Frequency</label>'
+      + '<select id="incFreq" class="field" onchange="saveIncomeFields()">'
+      + PAY_FREQUENCIES.map(function(f){ return '<option value="'+f[0]+'"'+(S.payFrequency===f[0]?" selected":"")+'>'+f[1]+'</option>'; }).join("")
+      + '</select></div>'
+      + '</div>'
+      + '<div class="fgroup"><label class="flabel">Last paycheck date</label>'
+      + '<input id="incLastDate" type="date" class="field" value="'+esc(S.lastPaycheckDate||"")+'" onchange="saveIncomeFields()"></div>'
+      + '<p class="muted" style="font-size:.72rem;margin:.35rem 0 .9rem">Use what actually lands in your account, after taxes and deductions — that\'s what makes the comparisons accurate. '
+      + (num(S.paycheckAmount)>0 && S.lastPaycheckDate
+          ? "≈ "+usd(proj)+" this month ("+count+" paycheck"+(count===1?"":"s")+"), based on your schedule."
+          : "Enter an amount and your last paycheck date to project this month's income.")
+      + ' Used for comparisons in Reports and here — never affects Available now. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-income\')">More info</button></p>';
+  } else {
+    h += moneyRow("Monthly income (take-home)", S.income, "S.income=num(this.value);persist();render()");
+  }
+  return h;
+}
+function setIncomeMode(mode){ S.incomeMode = mode; persist(); render(); }
+function saveIncomeFields(){
+  var pc = document.getElementById("incPaycheck");
+  var fr = document.getElementById("incFreq");
+  var ld = document.getElementById("incLastDate");
+  if(pc) S.paycheckAmount = num(pc.value);
+  if(fr) S.payFrequency = fr.value;
+  if(ld) S.lastPaycheckDate = ld.value;
+  persist(); render();
+}
 function goalsSettingsCard(){
   var active = billsList().filter(function(b){return b.active;});
   var activeFunds = fundsList().filter(function(f){return f.active;});
@@ -3585,14 +3811,14 @@ function goalsSettingsCard(){
     var t = billsList().reduce(function(s,b){return s+(dueInMonth(b,m)?baseAmount(b):0);},0) + fundsTotal;
     if(t>busiest) busiest=t;
   }
-  var leftover = num(S.income)-typical;
+  var leftover = monthlyIncomeFor(view.y, view.m)-typical;
 
   var h = '<h2 class="eyebrow">Income &amp; plan</h2>'
-    + moneyRow("Available funds (monthly)", S.income, "S.income=num(this.value);persist();render()")
+    + incomeSectionHtml()
     + '<div style="margin-top:.75rem;font-size:.875rem">'
     + '<div class="row"><span class="muted">Typical month (bills &amp; funds)</span><span class="tnum" style="font-weight:600">'+usd(typical)+'</span></div>'
     + '<div class="row"><span class="muted">Busiest month</span><span class="tnum" style="font-weight:600">'+usd(busiest)+'</span></div>'
-    + '<div class="row"><span class="muted">Left over (typical month)</span>'
+    + '<div class="row"><span class="muted">Left over (this month)</span>'
     + '<span class="tnum" style="font-weight:700;color:'+(leftover>=0?"var(--pine)":"var(--red)")+'">'+usd(leftover)+'</span></div>'
     + '</div>'
     + '<div class="divider"></div>'
@@ -3744,20 +3970,59 @@ var HELP_ITEMS = [
   { id:"help-reminders", title:"Get a heads-up before bills are due",
     body:"Go to Settings → Reminders and turn it on, then set how many days of lead time you want. Only bills with a due day set (Bills → edit a bill → Due day of month) are eligible — that's what tells Billfold when to notify you, so add one to anything you want a heads-up on. Each eligible bill also gets its own mute switch further down that page, for the ones you'd rather not be reminded about even with reminders on generally. Tapping a reminder notification opens straight to that bill's pay screen; some devices also offer a quick “Mark paid” action right from the notification. Reminders need the installed app — they're not available if you're using Billfold in a browser preview." },
   { id:"help-hide-tabs", title:"Hide tabs you don't use",
-    body:"Go to Settings → Tabs &amp; appearance to remove Bills, Log, or Tools from the tab bar — Month and Settings can't be hidden. This only changes what shows up in the tab bar; nothing about the tab itself changes, and you're not locked out of it. To open a hidden tab, go back to that same Settings page and tap its name — it opens right up, no need to switch it back on first. The setting is saved with your data, so it carries over if you restore on a new device." }
+    body:"Go to Settings → Tabs &amp; appearance to remove Bills, Log, or Tools from the tab bar — Month and Settings can't be hidden. This only changes what shows up in the tab bar; nothing about the tab itself changes, and you're not locked out of it. To open a hidden tab, go back to that same Settings page and tap its name — it opens right up, no need to switch it back on first. The setting is saved with your data, so it carries over if you restore on a new device." },
+  { id:"help-income", title:"Set up your income",
+    body:"Go to Settings → Setup. Enter net, take-home pay — after taxes and deductions — since that's what actually lands in your account and what makes the comparisons against spending accurate. “Flat amount” is the simplest option — just type a typical monthly figure. “Regular paycheck” instead asks for your paycheck amount, how often you're paid, and the date of your last paycheck — Billfold projects each month's income from that schedule rather than a flat average. This matters most for Weekly and Every 2 weeks: those schedules land an extra paycheck in some months (26 biweekly paychecks a year doesn't divide evenly into 12 months), and the projection reflects that instead of just multiplying one paycheck by a fixed number. Twice a month and Once a month don't have that quirk, so they're always a flat per-month amount. Either way, this is purely informational — it powers the income-vs-spending comparisons in Reports and on the Setup page itself, and never touches Available now or any bill math." }
+];
+var helpSearchQuery = "";
+function setHelpSearch(input){
+  var pos = input.selectionStart;
+  helpSearchQuery = input.value;
+  render();
+  var el = document.getElementById("helpSearchInput");
+  if(el){ el.focus(); try{ el.setSelectionRange(pos,pos); }catch(e){} }
+}
+function clearHelpSearch(){ helpSearchQuery = ""; render(); }
+var GLOSSARY_ITEMS = [
+  { term:"Fixed expense", def:"A known amount, due on a schedule — rent, a subscription, insurance. Marking it paid always reduces Available now.", linkLabel:"Add a fixed expense", onclick:"billsSubMode='bills';go('bills');openExpenseForm(null,'fixed')" },
+  { term:"Variable expense", def:"Due on a schedule, but the amount changes — set an estimate, then enter the real amount and confirm when it's actually due. No partial payments; it's either unpaid (showing the estimate) or paid (showing what you confirmed), and you can correct that amount anytime while it's marked paid.", linkLabel:"Add a variable expense", onclick:"billsSubMode='bills';go('bills');openExpenseForm(null,'variable')" },
+  { term:"Fund", def:"A monthly budget for a category of spending that varies, like groceries or gas — the only thing spending entries can pull from.", linkLabel:"Set up a fund", onclick:"billsSubMode='funds';go('bills');openExpenseForm(null,'fund')" },
+  { term:"Spending entry", def:"A single day-to-day expense logged in your ledger, always tied to a Fund — check “Unplanned” if it goes beyond that fund's budget.", linkLabel:"Log a spending entry", onclick:"trackMode='journal';go('track');openJournalForm(null)" },
+  { term:"Savings entry", def:"A deposit or withdrawal logged against one of your savings goals.", linkLabel:"Log a savings entry", onclick:"trackMode='savings';go('track');openSavingsEntryForm(null)" },
+  { term:"Goal", def:"A named savings target with a dollar amount — up to 5 at a time — that your savings entries count toward.", linkLabel:"Add a goal", onclick:"openSettingsSection('goals');openGoalForm(null)" },
+  { term:"Debt / credit", def:"A card or loan balance you pay down (in full or in part) whenever you like — it carries over month to month until it's cleared, with no interest math. Flag it “usable as a payment option” if it's revolving credit you'd pay other things with; leave that off for a fixed-purpose loan.", linkLabel:"Add debt or credit", onclick:"openSettingsSection('goals');openDebtForm(null)" },
+  { term:"Hidden tab", def:"A tab removed from the bottom tab bar for daily use, but still fully there — open it anytime by tapping its name in Settings → Tabs & appearance.", linkLabel:"Manage tabs", onclick:"openSettingsSection('tabs')" }
 ];
 function helpDetailCard(){
-  return HELP_ITEMS.map(function(item){ return helpItem(item.title, item.body, item.id); }).join("")
-    + '<div class="divider" style="margin:1rem 0"></div>'
-    + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.25rem">Glossary</h3>'
-    + glossaryItem("Fixed expense", "A known amount, due on a schedule — rent, a subscription, insurance. Marking it paid always reduces Available now.", "Add a fixed expense", "billsSubMode='bills';go('bills');openExpenseForm(null,'fixed')")
-    + glossaryItem("Variable expense", "Due on a schedule, but the amount changes — set an estimate, then enter the real amount and confirm when it's actually due. No partial payments; it's either unpaid (showing the estimate) or paid (showing what you confirmed), and you can correct that amount anytime while it's marked paid.", "Add a variable expense", "billsSubMode='bills';go('bills');openExpenseForm(null,'variable')")
-    + glossaryItem("Fund", "A monthly budget for a category of spending that varies, like groceries or gas — the only thing spending entries can pull from.", "Set up a fund", "billsSubMode='funds';go('bills');openExpenseForm(null,'fund')")
-    + glossaryItem("Spending entry", "A single day-to-day expense logged in your ledger, always tied to a Fund — check “Unplanned” if it goes beyond that fund's budget.", "Log a spending entry", "trackMode='journal';go('track');openJournalForm(null)")
-    + glossaryItem("Savings entry", "A deposit or withdrawal logged against one of your savings goals.", "Log a savings entry", "trackMode='savings';go('track');openSavingsEntryForm(null)")
-    + glossaryItem("Goal", "A named savings target with a dollar amount — up to 5 at a time — that your savings entries count toward.", "Add a goal", "openSettingsSection('goals');openGoalForm(null)")
-    + glossaryItem("Debt / credit", "A card or loan balance with a rate and monthly payment — its payment becomes a Fixed bill automatically. Flag it “usable as a payment option” if it's revolving credit you'd pay other things with; leave that off for a fixed-purpose loan. Best for simple-interest debt; not a good fit for mortgages.", "Add debt or credit", "openSettingsSection('goals');openDebtForm(null)")
-    + glossaryItem("Hidden tab", "A tab removed from the bottom tab bar for daily use, but still fully there — open it anytime by tapping its name in Settings → Tabs & appearance.", "Manage tabs", "openSettingsSection('tabs')");
+  var q = helpSearchQuery.trim().toLowerCase();
+  var matchedHelp = HELP_ITEMS.filter(function(item){
+    if(!q) return true;
+    return item.title.toLowerCase().indexOf(q)>=0 || item.body.toLowerCase().indexOf(q)>=0;
+  });
+  var matchedGlossary = GLOSSARY_ITEMS.filter(function(g){
+    if(!q) return true;
+    return g.term.toLowerCase().indexOf(q)>=0 || g.def.toLowerCase().indexOf(q)>=0;
+  });
+
+  var searchBar = '<div class="field" style="display:flex;align-items:center;gap:.4rem;margin-bottom:1rem;padding:0 .4rem 0 .6rem">'
+    + '<span style="color:var(--sub);display:flex;flex:none">'+icon("search",14)+'</span>'
+    + '<input id="helpSearchInput" style="flex:1;min-width:0;border:none;background:none;padding:.55rem 0;font-weight:500;font-size:.85rem" '
+    + 'placeholder="Search help…" value="'+esc(helpSearchQuery)+'" oninput="setHelpSearch(this)">'
+    + (helpSearchQuery ? '<button aria-label="Clear search" style="color:var(--sub);padding:.2rem" onclick="clearHelpSearch()">'+icon("x",14)+'</button>' : '')
+    + '</div>';
+
+  if(q && !matchedHelp.length && !matchedGlossary.length){
+    return searchBar + '<p class="muted" style="font-size:.875rem;padding:0 .25rem">No results for “'+esc(helpSearchQuery.trim())+'.”</p>';
+  }
+
+  var helpHtml = matchedHelp.map(function(item){ return helpItem(item.title, item.body, item.id, !!q); }).join("");
+  var glossaryHtml = '';
+  if(matchedGlossary.length){
+    glossaryHtml = '<div class="divider" style="margin:1rem 0"></div>'
+      + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.25rem">Glossary</h3>'
+      + matchedGlossary.map(function(g){ return glossaryItem(g.term, g.def, g.linkLabel, g.onclick); }).join("");
+  }
+  return searchBar + helpHtml + glossaryHtml;
 }
 function glossaryItem(term, def, linkLabel, onclick){
   return '<div style="margin-bottom:.85rem">'
@@ -3786,8 +4051,8 @@ function resetDetailCard(){
     + '<button class="btn btn-danger'+(confirmReset?" armed":"")+'" onclick="doReset()">'
     + icon("reset",16)+' '+(confirmReset?"Tap again to confirm":"Erase and start over")+'</button>';
 }
-function helpItem(title, bodyHtml, id){
-  return '<details'+(id?' id="'+id+'"':'')+'><summary>'+esc(title)+'</summary><div class="body">'+bodyHtml+'</div></details>';
+function helpItem(title, bodyHtml, id, forceOpen){
+  return '<details'+(id?' id="'+id+'"':'')+(forceOpen?' open':'')+'><summary>'+esc(title)+'</summary><div class="body">'+bodyHtml+'</div></details>';
 }
 function doReset(){
   if(confirmReset){
@@ -4529,6 +4794,7 @@ function isModalOpen(){
 function handleHardwareBack(){
   if(isModalOpen()){ closeModal(); return; }
   if(settingsSubScreen){ closeSettingsSection(); return; }
+  if(toolsSubScreen==="reports" && reportSubMode){ closeReportSection(); return; }
   if(toolsSubScreen){ closeToolsSection(); return; }
   try{ window.Capacitor.Plugins.App.exitApp(); }catch(e){ /* best effort */ }
 }
@@ -5038,8 +5304,8 @@ function devReplayOnboarding(){
 function startOnboarding(){ onboardStep1(); }
 function onboardStep1(){
   modal("Let's get set up",
-    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">First — what\'s your typical monthly income? This helps Billfold show what\'s left over after your bills.</p>'
-    + '<div class="fgroup"><label class="flabel">Monthly income</label>'
+    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">First — what\'s your typical monthly income, take-home after taxes? This helps Billfold show what\'s left over after your bills. You can switch to entering it by paycheck later in Settings → Setup.</p>'
+    + '<div class="fgroup"><label class="flabel">Monthly income (take-home)</label>'
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
     + '<input id="obIncome" class="tnum" inputmode="decimal" value="'+(S.income?S.income:"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
     + '<button class="btn btn-pine" style="width:100%;margin-top:1.25rem;padding:.8rem" onclick="onboardSaveStep1()">Continue</button>'
