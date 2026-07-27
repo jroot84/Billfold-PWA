@@ -546,216 +546,225 @@ function persist(){
 }
 
 var S = loadState() || seedState();
-if(!S.journal) S.journal = [];
-if(!S.savingsEntries) S.savingsEntries = [];
-if(S.remindersOn === undefined) S.remindersOn = false;
-if(!S.remindDays) S.remindDays = 3;
-if(S.devOptionsRevealed === undefined) S.devOptionsRevealed = false;
-/* Migrate existing installs: the investing calculator used to be a transient, unsaved
-   global. Bring it into S so it persists going forward. */
-if(!S.calc) S.calc = { start:1000, contrib:100, freq:"monthly", rate:7, years:20 };
-if(S.backupRemindersOn === undefined) S.backupRemindersOn = true;
-if(!S.backupReminderDays) S.backupReminderDays = 14;
-if(!S.hiddenTabs) S.hiddenTabs = [];
-if(!S.debts) S.debts = [];
-if(!S.incomeMode) S.incomeMode = "flat";
-if(S.paycheckAmount===undefined) S.paycheckAmount = 0;
-if(!S.payFrequency) S.payFrequency = "biweekly";
-if(S.lastPaycheckDate===undefined) S.lastPaycheckDate = "";
-if(!S._migratedDebtBillsRemoved){
-  var oldDebtBillIds = S.expenses.filter(function(e){ return !!e.linkedDebtId; }).map(function(e){ return e.id; });
-  if(oldDebtBillIds.length){
-    S.expenses = S.expenses.filter(function(e){ return !e.linkedDebtId; });
-    Object.keys(S.months).forEach(function(k){
-      oldDebtBillIds.forEach(function(id){
-        if(S.months[k].left){ delete S.months[k].left[id]; delete S.months[k].left[id+":2"]; }
-        if(S.months[k].paid){ delete S.months[k].paid[id]; delete S.months[k].paid[id+":2"]; }
-        if(S.months[k].payMethod){ delete S.months[k].payMethod[id]; delete S.months[k].payMethod[id+":2"]; }
-        if(S.months[k].debtPrincipalPaid){ delete S.months[k].debtPrincipalPaid[id]; delete S.months[k].debtPrincipalPaid[id+":2"]; }
+// Every default-backfill and one-time migration a freshly loaded S needs — also called after
+// restoring a backup (see imApply), since a restored S needs exactly the same treatment a
+// normal page load gives it. Missing this after import was a real bug: older data could carry
+// type:"fixed" bills, which billsList() no longer recognizes at all post-merge, and paid/unpaid
+// state living in the old "left"/"actuals"/"paid" fields, which current code never reads —
+// bills would vanish entirely or show the wrong paid status until these ran.
+function ensureStateDefaultsAndMigrations(){
+  if(!S.journal) S.journal = [];
+  if(!S.savingsEntries) S.savingsEntries = [];
+  if(S.remindersOn === undefined) S.remindersOn = false;
+  if(!S.remindDays) S.remindDays = 3;
+  if(S.devOptionsRevealed === undefined) S.devOptionsRevealed = false;
+  /* Migrate existing installs: the investing calculator used to be a transient, unsaved
+     global. Bring it into S so it persists going forward. */
+  if(!S.calc) S.calc = { start:1000, contrib:100, freq:"monthly", rate:7, years:20 };
+  if(S.backupRemindersOn === undefined) S.backupRemindersOn = true;
+  if(!S.backupReminderDays) S.backupReminderDays = 14;
+  if(!S.hiddenTabs) S.hiddenTabs = [];
+  if(!S.debts) S.debts = [];
+  if(!S.incomeMode) S.incomeMode = "flat";
+  if(S.paycheckAmount===undefined) S.paycheckAmount = 0;
+  if(!S.payFrequency) S.payFrequency = "biweekly";
+  if(S.lastPaycheckDate===undefined) S.lastPaycheckDate = "";
+  if(!S._migratedDebtBillsRemoved){
+    var oldDebtBillIds = S.expenses.filter(function(e){ return !!e.linkedDebtId; }).map(function(e){ return e.id; });
+    if(oldDebtBillIds.length){
+      S.expenses = S.expenses.filter(function(e){ return !e.linkedDebtId; });
+      Object.keys(S.months).forEach(function(k){
+        oldDebtBillIds.forEach(function(id){
+          if(S.months[k].left){ delete S.months[k].left[id]; delete S.months[k].left[id+":2"]; }
+          if(S.months[k].paid){ delete S.months[k].paid[id]; delete S.months[k].paid[id+":2"]; }
+          if(S.months[k].payMethod){ delete S.months[k].payMethod[id]; delete S.months[k].payMethod[id+":2"]; }
+          if(S.months[k].debtPrincipalPaid){ delete S.months[k].debtPrincipalPaid[id]; delete S.months[k].debtPrincipalPaid[id+":2"]; }
+        });
+        if(S.months[k].debtInterestCharged) delete S.months[k].debtInterestCharged;
       });
-      if(S.months[k].debtInterestCharged) delete S.months[k].debtInterestCharged;
-    });
+    }
+    // A debt/credit with an existing nonzero balance already has history worth showing as "Paid"
+    // once it clears — mark that now so nothing that already had a balance goes invisible.
+    S.debts.forEach(function(d){ if(num(d.balance)>0) d.everCarriedBalance = true; });
+    S._migratedDebtBillsRemoved = true;
   }
-  // A debt/credit with an existing nonzero balance already has history worth showing as "Paid"
-  // once it clears — mark that now so nothing that already had a balance goes invisible.
-  S.debts.forEach(function(d){ if(num(d.balance)>0) d.everCarriedBalance = true; });
-  S._migratedDebtBillsRemoved = true;
-}
-S.debts.forEach(function(d){ if(d.usableAsPayment===undefined) d.usableAsPayment = false; });
-/* Migrate existing installs to the simplified variable-bill tracking: derive "amount paid
-   so far this month" from the old estimate/actual split, so history and reports read the
-   same as before even though there's no separate "actual" field anymore. Runs once. */
-if(!S._migratedVariablePayTracking){
-  (function(){
-    var billsById = {};
-    S.expenses.forEach(function(e){ billsById[e.id] = e; });
-    Object.keys(S.months).forEach(function(mkKey){
-      var month = S.months[mkKey];
-      if(!month.actuals && !month.left) return;
-      if(!month.left) month.left = {};
-      if(!month.paid) month.paid = {};
-      var keys = {};
-      Object.keys(month.actuals||{}).forEach(function(k){ keys[k]=1; });
-      Object.keys(month.left||{}).forEach(function(k){ keys[k]=1; });
-      Object.keys(keys).forEach(function(key){
-        var billId = (key.slice(-2)===":2") ? key.slice(0,-2) : key;
-        var bill = billsById[billId];
-        if(!bill || bill.type!=="variable") return;
-        var oldActual = month.actuals ? month.actuals[key] : undefined;
-        var totalOld = (oldActual===undefined||oldActual===null) ? num(bill.estimate) : num(oldActual);
-        var leftOld = (month.left[key]===undefined||month.left[key]===null) ? totalOld : num(month.left[key]);
-        var paidVal = totalOld - leftOld;
-        month.left[key] = leftOld;
-        if(paidVal) month.paid[key] = paidVal;
-      });
-    });
-  })();
-  S._migratedVariablePayTracking = true;
-}
-/* Migrate again to the simplified binary paid/unpaid model: variable bills no longer track
-   an ongoing "amount owed," just whether they're paid and for how much. Anything with money
-   already recorded against it closes out at that amount (the correct thing for Available now's
-   history); anything with no payment yet reverts to showing the bill's estimate. Runs once. */
-if(!S._migratedVariableBinaryPaid){
-  (function(){
-    var billsById = {};
-    S.expenses.forEach(function(e){ billsById[e.id] = e; });
-    Object.keys(S.months).forEach(function(mkKey){
-      var month = S.months[mkKey];
-      if(!month.paid) return;
-      if(!month.varPaid) month.varPaid = {};
-      Object.keys(month.paid).forEach(function(key){
-        var billId = (key.slice(-2)===":2") ? key.slice(0,-2) : key;
-        var bill = billsById[billId];
-        if(!bill || bill.type!=="variable") return;
-        var paidAmt = num(month.paid[key]);
-        if(paidAmt>0) month.varPaid[key] = paidAmt;
-        delete month.paid[key];
-        if(month.left) delete month.left[key];
-      });
-    });
-  })();
-  S._migratedVariableBinaryPaid = true;
-}
-/* Goal-linked bills always use the Variable payment mechanism now — a transfer amount is
-   just as likely to come in under budget as any other variable expense, and the old Fixed+Goal
-   combination never actually supported an editable/adjusted amount anyway. Convert any existing
-   Fixed+Goal bills over: the flat "amount" becomes the new "estimate", and any month already
-   marked paid gets its paid flag translated into the varPaid model so history reads the same. */
-if(!S._migratedGoalBillsToVariable){
-  (function(){
-    var goalFixedIds = {};
-    S.expenses.forEach(function(e){
-      if(e.linkedGoalId && e.type==="fixed"){
-        goalFixedIds[e.id] = true;
-        e.estimate = num(e.amount);
-        e.type = "variable";
-      }
-    });
-    if(Object.keys(goalFixedIds).length){
+  S.debts.forEach(function(d){ if(d.usableAsPayment===undefined) d.usableAsPayment = false; });
+  /* Migrate existing installs to the simplified variable-bill tracking: derive "amount paid
+     so far this month" from the old estimate/actual split, so history and reports read the
+     same as before even though there's no separate "actual" field anymore. Runs once. */
+  if(!S._migratedVariablePayTracking){
+    (function(){
+      var billsById = {};
+      S.expenses.forEach(function(e){ billsById[e.id] = e; });
       Object.keys(S.months).forEach(function(mkKey){
         var month = S.months[mkKey];
-        if(!month.left) return;
-        if(!month.varPaid) month.varPaid = {};
-        Object.keys(month.left).forEach(function(key){
+        if(!month.actuals && !month.left) return;
+        if(!month.left) month.left = {};
+        if(!month.paid) month.paid = {};
+        var keys = {};
+        Object.keys(month.actuals||{}).forEach(function(k){ keys[k]=1; });
+        Object.keys(month.left||{}).forEach(function(k){ keys[k]=1; });
+        Object.keys(keys).forEach(function(key){
           var billId = (key.slice(-2)===":2") ? key.slice(0,-2) : key;
-          if(!goalFixedIds[billId]) return;
-          if(num(month.left[key])===0){
-            var bill = S.expenses.filter(function(x){ return x.id===billId; })[0];
-            month.varPaid[key] = bill ? num(bill.estimate) : 0;
-          }
-          delete month.left[key];
+          var bill = billsById[billId];
+          if(!bill || bill.type!=="variable") return;
+          var oldActual = month.actuals ? month.actuals[key] : undefined;
+          var totalOld = (oldActual===undefined||oldActual===null) ? num(bill.estimate) : num(oldActual);
+          var leftOld = (month.left[key]===undefined||month.left[key]===null) ? totalOld : num(month.left[key]);
+          var paidVal = totalOld - leftOld;
+          month.left[key] = leftOld;
+          if(paidVal) month.paid[key] = paidVal;
         });
       });
-    }
-  })();
-  S._migratedGoalBillsToVariable = true;
-}
-/* Fixed and Variable are now just "Bill" — one type, one mechanic. The distinction stopped
-   earning its keep once Variable could do everything Fixed could (instant-check, editable
-   amount, Skip) plus handle a bill coming in over or under expectations, which Fixed never
-   could. Convert every remaining Fixed bill over: "amount" becomes "estimate", and any month
-   already marked paid gets its paid flag translated into the varPaid model, same as above.
-   Partial payment (Fixed's old "left" tracking) has no equivalent in the merged model — a bill
-   is due or paid at whatever amount was confirmed, never "partway paid" in between. */
-if(!S._migratedAllBillsToVariable){
-  (function(){
-    var fixedIds = {};
-    S.expenses.forEach(function(e){
-      if(e.type==="fixed"){
-        fixedIds[e.id] = true;
-        e.estimate = num(e.amount);
-        e.type = "variable";
-      }
-    });
-    if(Object.keys(fixedIds).length){
+    })();
+    S._migratedVariablePayTracking = true;
+  }
+  /* Migrate again to the simplified binary paid/unpaid model: variable bills no longer track
+     an ongoing "amount owed," just whether they're paid and for how much. Anything with money
+     already recorded against it closes out at that amount (the correct thing for Available now's
+     history); anything with no payment yet reverts to showing the bill's estimate. Runs once. */
+  if(!S._migratedVariableBinaryPaid){
+    (function(){
+      var billsById = {};
+      S.expenses.forEach(function(e){ billsById[e.id] = e; });
       Object.keys(S.months).forEach(function(mkKey){
         var month = S.months[mkKey];
-        if(!month.left) return;
+        if(!month.paid) return;
         if(!month.varPaid) month.varPaid = {};
-        Object.keys(month.left).forEach(function(key){
+        Object.keys(month.paid).forEach(function(key){
           var billId = (key.slice(-2)===":2") ? key.slice(0,-2) : key;
-          if(!fixedIds[billId]) return;
-          if(num(month.left[key])===0){
-            var bill = S.expenses.filter(function(x){ return x.id===billId; })[0];
-            month.varPaid[key] = bill ? num(bill.estimate) : 0;
-          }
-          delete month.left[key];
+          var bill = billsById[billId];
+          if(!bill || bill.type!=="variable") return;
+          var paidAmt = num(month.paid[key]);
+          if(paidAmt>0) month.varPaid[key] = paidAmt;
+          delete month.paid[key];
+          if(month.left) delete month.left[key];
         });
       });
-    }
-  })();
-  S._migratedAllBillsToVariable = true;
-}
-/* Category and "linked to a savings goal" used to be the same field — picking a goal replaced
-   the category with a synthetic "→ Goal Name" string. They're independent now, so an existing
-   goal-linked bill's category just loses that arrow prefix and becomes a normal, editable,
-   reportable category — same name, same grouping, just no longer a special-cased string. */
-if(!S._migratedGoalCategorySplit){
-  S.expenses.forEach(function(e){
-    if(e.linkedGoalId && typeof e.category==="string" && e.category.indexOf("→ ")===0){
-      e.category = e.category.slice(2);
-      if(S.categories.indexOf(e.category)<0) S.categories.push(e.category);
-    }
+    })();
+    S._migratedVariableBinaryPaid = true;
+  }
+  /* Goal-linked bills always use the Variable payment mechanism now — a transfer amount is
+     just as likely to come in under budget as any other variable expense, and the old Fixed+Goal
+     combination never actually supported an editable/adjusted amount anyway. Convert any existing
+     Fixed+Goal bills over: the flat "amount" becomes the new "estimate", and any month already
+     marked paid gets its paid flag translated into the varPaid model so history reads the same. */
+  if(!S._migratedGoalBillsToVariable){
+    (function(){
+      var goalFixedIds = {};
+      S.expenses.forEach(function(e){
+        if(e.linkedGoalId && e.type==="fixed"){
+          goalFixedIds[e.id] = true;
+          e.estimate = num(e.amount);
+          e.type = "variable";
+        }
+      });
+      if(Object.keys(goalFixedIds).length){
+        Object.keys(S.months).forEach(function(mkKey){
+          var month = S.months[mkKey];
+          if(!month.left) return;
+          if(!month.varPaid) month.varPaid = {};
+          Object.keys(month.left).forEach(function(key){
+            var billId = (key.slice(-2)===":2") ? key.slice(0,-2) : key;
+            if(!goalFixedIds[billId]) return;
+            if(num(month.left[key])===0){
+              var bill = S.expenses.filter(function(x){ return x.id===billId; })[0];
+              month.varPaid[key] = bill ? num(bill.estimate) : 0;
+            }
+            delete month.left[key];
+          });
+        });
+      }
+    })();
+    S._migratedGoalBillsToVariable = true;
+  }
+  /* Fixed and Variable are now just "Bill" — one type, one mechanic. The distinction stopped
+     earning its keep once Variable could do everything Fixed could (instant-check, editable
+     amount, Skip) plus handle a bill coming in over or under expectations, which Fixed never
+     could. Convert every remaining Fixed bill over: "amount" becomes "estimate", and any month
+     already marked paid gets its paid flag translated into the varPaid model, same as above.
+     Partial payment (Fixed's old "left" tracking) has no equivalent in the merged model — a bill
+     is due or paid at whatever amount was confirmed, never "partway paid" in between. */
+  if(!S._migratedAllBillsToVariable){
+    (function(){
+      var fixedIds = {};
+      S.expenses.forEach(function(e){
+        if(e.type==="fixed"){
+          fixedIds[e.id] = true;
+          e.estimate = num(e.amount);
+          e.type = "variable";
+        }
+      });
+      if(Object.keys(fixedIds).length){
+        Object.keys(S.months).forEach(function(mkKey){
+          var month = S.months[mkKey];
+          if(!month.left) return;
+          if(!month.varPaid) month.varPaid = {};
+          Object.keys(month.left).forEach(function(key){
+            var billId = (key.slice(-2)===":2") ? key.slice(0,-2) : key;
+            if(!fixedIds[billId]) return;
+            if(num(month.left[key])===0){
+              var bill = S.expenses.filter(function(x){ return x.id===billId; })[0];
+              month.varPaid[key] = bill ? num(bill.estimate) : 0;
+            }
+            delete month.left[key];
+          });
+        });
+      }
+    })();
+    S._migratedAllBillsToVariable = true;
+  }
+  /* Category and "linked to a savings goal" used to be the same field — picking a goal replaced
+     the category with a synthetic "→ Goal Name" string. They're independent now, so an existing
+     goal-linked bill's category just loses that arrow prefix and becomes a normal, editable,
+     reportable category — same name, same grouping, just no longer a special-cased string. */
+  if(!S._migratedGoalCategorySplit){
+    S.expenses.forEach(function(e){
+      if(e.linkedGoalId && typeof e.category==="string" && e.category.indexOf("→ ")===0){
+        e.category = e.category.slice(2);
+        if(S.categories.indexOf(e.category)<0) S.categories.push(e.category);
+      }
+    });
+    S._migratedGoalCategorySplit = true;
+  }
+  /* Debts and credit cards now show up as bills in their own Month-tab section, each with a
+     payoff method: "full" (the default each month is whatever the live balance is — checking it
+     off pays it off completely) or "fixed" (a set monthly amount, same as a regular bill). Loans
+     never had a knowable "amount due" before; migrate them to fixed mode with a best-guess
+     monthly payment since there's no way to infer their intended payment from old data. */
+  if(!S._migratedDebtsPayoffMethod){
+    (function(){
+      var today = new Date();
+      var curKey = mk(today.getFullYear(), today.getMonth()+1);
+      S.debts.forEach(function(d){
+        if(d.payoffMethod) return;
+        d.payoffMethod = d.usableAsPayment ? "full" : "fixed";
+        if(d.payoffMethod==="fixed"){
+          d.monthlyPayment = num(d.paidOffAmount) || num(d.balance) || 0;
+        }
+        if(!d.paidMonths) d.paidMonths = {};
+        if(!d.payMethodByMonth) d.payMethodByMonth = {};
+        // Preserve "currently shows paid" continuity for anything already marked paid off.
+        if(num(d.balance)<=0 && num(d.paidOffAmount)>0){
+          d.paidMonths[curKey] = num(d.paidOffAmount);
+          d.payMethodByMonth[curKey] = d.lastPayMethod || "available";
+        }
+      });
+    })();
+    S._migratedDebtsPayoffMethod = true;
+  }
+  S.savingsEntries = S.savingsEntries.map(function(e){
+    var amt = num(e.amount);
+    var type = e.type || (amt < 0 ? "withdrawal" : "deposit");
+    return { id:e.id, date:e.date, note:e.note||"", type:type, amount:Math.abs(amt), goalId:e.goalId };
   });
-  S._migratedGoalCategorySplit = true;
+  migrateSavingsGoals();
+  migrateOneTimeExpenses();
+  migrateToSingleOneTime();
+  migrateExpenses();
+  migrateJournalEntries();
 }
-/* Debts and credit cards now show up as bills in their own Month-tab section, each with a
-   payoff method: "full" (the default each month is whatever the live balance is — checking it
-   off pays it off completely) or "fixed" (a set monthly amount, same as a regular bill). Loans
-   never had a knowable "amount due" before; migrate them to fixed mode with a best-guess
-   monthly payment since there's no way to infer their intended payment from old data. */
-if(!S._migratedDebtsPayoffMethod){
-  (function(){
-    var today = new Date();
-    var curKey = mk(today.getFullYear(), today.getMonth()+1);
-    S.debts.forEach(function(d){
-      if(d.payoffMethod) return;
-      d.payoffMethod = d.usableAsPayment ? "full" : "fixed";
-      if(d.payoffMethod==="fixed"){
-        d.monthlyPayment = num(d.paidOffAmount) || num(d.balance) || 0;
-      }
-      if(!d.paidMonths) d.paidMonths = {};
-      if(!d.payMethodByMonth) d.payMethodByMonth = {};
-      // Preserve "currently shows paid" continuity for anything already marked paid off.
-      if(num(d.balance)<=0 && num(d.paidOffAmount)>0){
-        d.paidMonths[curKey] = num(d.paidOffAmount);
-        d.payMethodByMonth[curKey] = d.lastPayMethod || "available";
-      }
-    });
-  })();
-  S._migratedDebtsPayoffMethod = true;
-}
-S.savingsEntries = S.savingsEntries.map(function(e){
-  var amt = num(e.amount);
-  var type = e.type || (amt < 0 ? "withdrawal" : "deposit");
-  return { id:e.id, date:e.date, note:e.note||"", type:type, amount:Math.abs(amt), goalId:e.goalId };
-});
-migrateSavingsGoals();
-migrateOneTimeExpenses();
-migrateToSingleOneTime();
-migrateExpenses();
-migrateJournalEntries();
+ensureStateDefaultsAndMigrations();
 var view = { screen:"month", y:(new Date()).getFullYear(), m:(new Date()).getMonth()+1 };
 var payId = null, payOcc = 1, editId = null, confirmDel = false, confirmReset = false, pickerYear = null, reportScope = "month";
 // Spending/Savings-only lookback period — separate from reportScope, which stays tied to
@@ -1625,7 +1634,6 @@ function billRow(b){
   return '<li><button class="bill-li" style="width:100%;text-align:left;opacity:'+(b.active?1:.5)+'" onclick="'+openFn+'">'
     + '<div style="flex:1"><div class="bill-name">'+esc(b.name)
     + (b.active?'':' <span style="font-size:.7rem;font-weight:500;padding:.1rem .35rem;border-radius:.25rem;background:var(--line);color:var(--sub)">Paused</span>')
-    + (b.type==="variable"?' <span style="font-size:.7rem;font-weight:600;color:var(--sub)">est.</span>':'')
     + '</div><div class="bill-cat">'
     + (billsSort==="cat_group" ? freqText(b) : esc(b.category)+' · '+freqText(b))
     + '</div></div>'
@@ -5097,10 +5105,7 @@ function imApply(raw){
     S = base;
     activeSavingsGoalId = null;
     savingsFilterGoal = null;
-    migrateSavingsGoals();
-    migrateOneTimeExpenses();
-    migrateExpenses();
-    migrateJournalEntries();
+    ensureStateDefaultsAndMigrations();
     persist(); closeModal(); render();
   }catch(e){
     var el = document.getElementById("imErr");
