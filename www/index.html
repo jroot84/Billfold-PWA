@@ -621,6 +621,66 @@ if(!S._migratedVariableBinaryPaid){
   })();
   S._migratedVariableBinaryPaid = true;
 }
+/* Goal-linked bills always use the Variable payment mechanism now — a transfer amount is
+   just as likely to come in under budget as any other variable expense, and the old Fixed+Goal
+   combination never actually supported an editable/adjusted amount anyway. Convert any existing
+   Fixed+Goal bills over: the flat "amount" becomes the new "estimate", and any month already
+   marked paid gets its paid flag translated into the varPaid model so history reads the same. */
+if(!S._migratedGoalBillsToVariable){
+  (function(){
+    var goalFixedIds = {};
+    S.expenses.forEach(function(e){
+      if(e.linkedGoalId && e.type==="fixed"){
+        goalFixedIds[e.id] = true;
+        e.estimate = num(e.amount);
+        e.type = "variable";
+      }
+    });
+    if(Object.keys(goalFixedIds).length){
+      Object.keys(S.months).forEach(function(mkKey){
+        var month = S.months[mkKey];
+        if(!month.left) return;
+        if(!month.varPaid) month.varPaid = {};
+        Object.keys(month.left).forEach(function(key){
+          var billId = (key.slice(-2)===":2") ? key.slice(0,-2) : key;
+          if(!goalFixedIds[billId]) return;
+          if(num(month.left[key])===0){
+            var bill = S.expenses.filter(function(x){ return x.id===billId; })[0];
+            month.varPaid[key] = bill ? num(bill.estimate) : 0;
+          }
+          delete month.left[key];
+        });
+      });
+    }
+  })();
+  S._migratedGoalBillsToVariable = true;
+}
+/* Debts and credit cards now show up as bills in their own Month-tab section, each with a
+   payoff method: "full" (the default each month is whatever the live balance is — checking it
+   off pays it off completely) or "fixed" (a set monthly amount, same as a regular bill). Loans
+   never had a knowable "amount due" before; migrate them to fixed mode with a best-guess
+   monthly payment since there's no way to infer their intended payment from old data. */
+if(!S._migratedDebtsPayoffMethod){
+  (function(){
+    var today = new Date();
+    var curKey = mk(today.getFullYear(), today.getMonth()+1);
+    S.debts.forEach(function(d){
+      if(d.payoffMethod) return;
+      d.payoffMethod = d.usableAsPayment ? "full" : "fixed";
+      if(d.payoffMethod==="fixed"){
+        d.monthlyPayment = num(d.paidOffAmount) || num(d.balance) || 0;
+      }
+      if(!d.paidMonths) d.paidMonths = {};
+      if(!d.payMethodByMonth) d.payMethodByMonth = {};
+      // Preserve "currently shows paid" continuity for anything already marked paid off.
+      if(num(d.balance)<=0 && num(d.paidOffAmount)>0){
+        d.paidMonths[curKey] = num(d.paidOffAmount);
+        d.payMethodByMonth[curKey] = d.lastPayMethod || "available";
+      }
+    });
+  })();
+  S._migratedDebtsPayoffMethod = true;
+}
 S.savingsEntries = S.savingsEntries.map(function(e){
   var amt = num(e.amount);
   var type = e.type || (amt < 0 ? "withdrawal" : "deposit");
@@ -785,11 +845,18 @@ function paymentOptions(excludeId){
 }
 // Adding a charge to a credit-flagged debt (a bill, spending entry, or another debt's payment
 // routed to it) — just adds to the balance, no interest math. Reversible via unchargeDebt.
-function chargeDebt(debtId, amount){
+function chargeDebt(debtId, amount, y, m){
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt || amount<=0) return;
   debt.balance = num(num(debt.balance) + amount);
-  if(debt.balance>0){ debt.everCarriedBalance = true; debt.paidOffAmount = 0; }
+  if(debt.balance>0) debt.everCarriedBalance = true;
+  // A new charge on a "pay in full" card that's already marked paid for that month means
+  // there's newly unpaid money again — clear that month's paid flag (not the payment itself,
+  // which already genuinely happened) so the row goes back to showing what's actually owed.
+  if(debt.payoffMethod==="full" && y!=null && m!=null){
+    var key = mk(y,m);
+    if(debt.paidMonths && debt.paidMonths[key]!==undefined) delete debt.paidMonths[key];
+  }
 }
 function unchargeDebt(debtId, amount){
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
@@ -801,7 +868,7 @@ function unchargeDebt(debtId, amount){
 // money — applying charges Available now or a credit balance; reversing undoes exactly that.
 function applyPaymentEffect(y, m, method, amount){
   if(!amount) return;
-  if(method && method!=="available") chargeDebt(method, amount);
+  if(method && method!=="available") chargeDebt(method, amount, y, m);
   else subtractBalanceAt(y, m, amount);
 }
 function reversePaymentEffect(y, m, method, amount){
@@ -826,78 +893,104 @@ function revertDebtExtraPayment(debtId, amount){
   if(!debt || amount<=0) return;
   debt.balance = num(num(debt.balance) + amount);
 }
-// Pays down a debt/credit balance by a specific amount via a chosen method — the Month tab's
-// pay screen for debt/credit rows routes through here, whether that's a quick full payoff via
-// the checkbox or a partial amount typed into the modal. Tracks what was paid and how, so a
-// credit card sitting at $0 can show "Paid" and be corrected or undone cleanly; a standard
-// debt paid off in full triggers its own one-time payoff modal instead.
-function payDebtBalance(debtId, amount, method){
+// Amount due this month: the live balance for a "pay in full" debt (so checking it off always
+// zeroes it out), or the fixed monthly payment for a "set amount" debt/loan — new charges don't
+// touch this number, only the balance they're calculated against.
+function debtDueAmount(debt){
+  return debt.payoffMethod==="fixed" ? num(debt.monthlyPayment) : num(debt.balance);
+}
+function debtPaidAmount(debt, y, m){
+  var v = debt.paidMonths ? debt.paidMonths[mk(y,m)] : undefined;
+  return (v===undefined||v===null) ? null : num(v); // null = not paid this month
+}
+function debtLeftOf(debt, y, m){
+  return debtPaidAmount(debt, y, m)===null ? debtDueAmount(debt) : 0;
+}
+function debtFullAmountFor(debt, y, m){
+  var paidAmt = debtPaidAmount(debt, y, m);
+  return paidAmt===null ? debtDueAmount(debt) : paidAmt;
+}
+// Marks (or corrects) this month's payment toward a debt — reduces the real balance and applies
+// the payment effect, reversing whatever was previously paid this month first if this is a
+// correction rather than a first payment. Mirrors markVariablePaidAt's reverse-then-reapply
+// pattern, but also has to move the debt's own running balance, which a bill never has.
+function markDebtPaidAt(y, m, debtId, amount, method){
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt) return;
-  var bal = num(debt.balance);
-  var pay = Math.max(0, Math.min(num(amount), bal));
-  if(pay<=0) return;
-  var m = method || debt.defaultPayMethod || "available";
-  applyPaymentEffect(view.y, view.m, m, pay);
-  debt.balance = num(bal - pay);
-  if(debt.balance<=0){
-    debt.balance = 0;
-    debt.paidOffAmount = pay;
-    debt.lastPayMethod = m;
-    persist(); render();
-    if(!debt.usableAsPayment){ maybeShowDebtPayoffCongrats(debtId, pay, m); return; }
-  } else {
-    debt.paidOffAmount = 0;
-    persist(); render();
+  if(!debt.paidMonths) debt.paidMonths = {};
+  if(!debt.payMethodByMonth) debt.payMethodByMonth = {};
+  var key = mk(y,m);
+  var wasPaid = debt.paidMonths[key];
+  var oldMethod = debt.payMethodByMonth[key] || debt.defaultPayMethod || "available";
+  var newMethod = method || oldMethod;
+  if(wasPaid!==undefined){
+    reversePaymentEffect(y, m, oldMethod, num(wasPaid));
+    debt.balance = num(debt.balance) + num(wasPaid);
   }
-  showBalanceWarning();
+  var pay = Math.max(0, Math.min(num(amount), num(debt.balance)));
+  if(pay>0) applyPaymentEffect(y, m, newMethod, pay);
+  debt.balance = num(num(debt.balance) - pay);
+  debt.paidMonths[key] = pay;
+  debt.payMethodByMonth[key] = newMethod;
+  if(debt.balance>0) debt.everCarriedBalance = true;
+  return newMethod;
 }
-// Checkbox quick-tap: always pays the entire current balance.
-function quickPayDebtInFull(debtId){
-  var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
-  if(!debt) return;
-  payDebtBalance(debtId, debt.balance, debt.defaultPayMethod || "available");
-}
-// Restores a credit card's balance after a payoff — the checkbox "uncheck" action, only
-// reachable while it's sitting at $0 with a recorded last payment (standard debt never shows
-// this state, since it drops off the list instead — see maybeShowDebtPayoffCongrats/undo).
-function unpayDebtBalance(debtId){
-  var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
-  if(!debt) return;
-  var amt = num(debt.paidOffAmount);
-  if(amt<=0) return;
-  reversePaymentEffect(view.y, view.m, debt.lastPayMethod || "available", amt);
-  debt.balance = amt;
-  debt.paidOffAmount = 0;
+function markDebtPaid(debtId, amount, method){
+  var m2 = markDebtPaidAt(view.y, view.m, debtId, amount, method);
   persist(); render();
-  showBalanceWarning();
+  if(S.remindersOn) scheduleRemindersDebounced();
+  return m2;
 }
-function maybeShowDebtPayoffCongrats(debtId, paidAmount, method){
+function unmarkDebtPaidAt(y, m, debtId){
+  var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
+  if(!debt || !debt.paidMonths) return;
+  var key = mk(y,m);
+  var paidAmt = debt.paidMonths[key];
+  if(paidAmt===undefined) return;
+  var method = (debt.payMethodByMonth && debt.payMethodByMonth[key]) || "available";
+  reversePaymentEffect(y, m, method, num(paidAmt));
+  debt.balance = num(debt.balance) + num(paidAmt);
+  delete debt.paidMonths[key];
+  if(debt.payMethodByMonth) delete debt.payMethodByMonth[key];
+}
+function unmarkDebtPaid(debtId){
+  unmarkDebtPaidAt(view.y, view.m, debtId);
+  persist(); render();
+  if(S.remindersOn) scheduleRemindersDebounced();
+}
+// Checkbox: pays the default due amount instantly, same principle as a Variable bill. Unchecking
+// reverses a real payment, so it opens the pay sheet to confirm instead of happening silently.
+function toggleDebtPaid(debtId){
+  var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
+  if(!debt) return;
+  if(debtPaidAmount(debt, view.y, view.m)===null){
+    markDebtPaid(debtId, debtDueAmount(debt), undefined);
+    if(!debt.usableAsPayment && num(debt.balance)<=0){ maybeShowDebtPayoffCongrats(debtId); return; }
+    showBalanceWarning();
+    return;
+  }
+  openDebtPay(debtId);
+}
+function maybeShowDebtPayoffCongrats(debtId){
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt) return;
   var warn = balanceWarning; balanceWarning = null;
+  var paidAmt = debtPaidAmount(debt, view.y, view.m) || 0;
   modal("🎉 You paid off "+esc(debt.name)+"!",
     (warn ? '<p style="font-size:.85rem;font-weight:600;margin-bottom:.75rem;color:var(--amber)">'+esc(warn)+'</p>' : '')
-    + '<p class="muted" style="font-size:.9rem;margin-bottom:1rem">That\'s '+usd(paidAmount)+' toward being debt-free. This one\'s done, so it\'s dropping off your Month tab.</p>'
+    + '<p class="muted" style="font-size:.9rem;margin-bottom:1rem">That\'s '+usd(paidAmt)+' toward being debt-free. This one\'s done, so it\'s dropping off your Month tab.</p>'
     + '<button class="btn btn-pine" style="width:100%;margin-bottom:.5rem" onclick="closeModal()">Nice!</button>'
-    + '<button class="btn btn-ghost" style="width:100%" onclick="undoDebtPayoff(\''+debtId+'\','+paidAmount+',\''+method+'\')">Undo</button>');
-}
-function undoDebtPayoff(debtId, amt, method){
-  var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
-  if(!debt) return;
-  reversePaymentEffect(view.y, view.m, method, num(amt));
-  debt.balance = num(amt);
-  debt.paidOffAmount = 0;
-  closeModal(); persist(); render();
+    + '<button class="btn btn-ghost" style="width:100%" onclick="unmarkDebtPaid(\''+debtId+'\');closeModal()">Undo</button>');
 }
 var debtPayId = null;
 function openDebtPay(debtId){
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt) return;
   debtPayId = debtId;
-  var bal = num(debt.balance);
-  var isPaidOff = bal<=0 && !!debt.everCarriedBalance;
-  var displayAmt = isPaidOff ? num(debt.paidOffAmount) : bal;
+  var due = debtDueAmount(debt);
+  var paidAmt = debtPaidAmount(debt, view.y, view.m);
+  var isPaid = paidAmt !== null;
+  var full = isPaid ? paidAmt : due;
   var opts = paymentOptions(debtId);
   var currentMethod = debt.defaultPayMethod || "available";
   var methodBlock = opts.length>1
@@ -907,18 +1000,21 @@ function openDebtPay(debtId){
       + '</select></div>'
     : '';
   modal(esc(debt.name),
-    '<p class="muted" style="font-size:.875rem;margin-bottom:1rem">'+usd(displayAmt)+'</p>'
+    '<p class="muted" style="font-size:.875rem;margin-bottom:1rem">'+usd(num(debt.balance)+(isPaid?paidAmt:0))+' total balance owed</p>'
     + '<label class="flabel">Amount</label>'
     + '<div style="display:flex;gap:.5rem">'
     + '<div class="money" style="flex:1;width:auto;border-radius:.75rem;padding:0 .75rem">'
-    + '<span>$</span><input id="debtPayInput" class="tnum" inputmode="decimal" value="'+displayAmt+'" style="padding:.6rem 0 .6rem .25rem;font-size:1rem" onkeydown="if(event.key===\'Enter\')debtPaySave()">'+calcBtn()+'</div>'
-    + '<button class="btn btn-ink" onclick="debtPaySave()">'+(isPaidOff?"Save":"Pay")+'</button></div>'
+    + '<span>$</span><input id="debtPayInput" class="tnum" inputmode="decimal" value="'+full+'" style="padding:.6rem 0 .6rem .25rem;font-size:1rem" onkeydown="if(event.key===\'Enter\')debtPaySave()">'+calcBtn()+'</div>'
+    + '<button class="btn btn-ink" onclick="debtPaySave()">'+(isPaid?"Save":"Mark paid")+'</button></div>'
     + methodBlock
     + '<p class="muted" style="font-size:.75rem;margin-top:.5rem">'
-    + (isPaidOff ? "Paid off. Edit the amount and save to correct it, or mark unpaid to restore the balance."
-                 : "Enter how much you're paying — anything left over carries into next month.")
+    + (isPaid ? "Marked paid. Edit the amount and save to correct it — the difference adjusts Available now (or wherever it's paid from) and the balance together."
+               : (debt.payoffMethod==="full" ? "Defaults to the full balance. Enter a different amount to pay less (or more), then confirm."
+                                              : "Defaults to the monthly payment set on this debt. Enter a different amount for an extra or partial payment."))
     + '</p>'
-    + (isPaidOff ? '<button class="btn btn-ghost" style="width:100%;margin-top:.5rem" onclick="debtPayUnpay()">Mark unpaid</button>' : ''));
+    + (isPaid ? '<button class="btn btn-ghost" style="width:100%;margin-top:.5rem" onclick="debtPayUnpay()">Mark unpaid</button>' : '')
+    + '<div class="divider" style="margin:1rem 0"></div>'
+    + '<button class="btn btn-ghost" style="width:100%" onclick="closeModal();openDebtForm(\''+debtId+'\')">Edit debt details</button>');
   var inp = document.getElementById("debtPayInput");
   if(inp){ inp.focus(); inp.select(); }
 }
@@ -929,29 +1025,20 @@ function getDebtPayMethod(){
 function debtPaySave(){
   var inp = document.getElementById("debtPayInput");
   if(!debtPayId || !inp) return;
-  var debt = S.debts.filter(function(d){ return d.id===debtPayId; })[0];
+  var debtId = debtPayId;
+  var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt) return;
-  var method = getDebtPayMethod() || debt.defaultPayMethod || "available";
-  var bal = num(debt.balance);
-  var isPaidOff = bal<=0 && !!debt.everCarriedBalance;
+  var method = getDebtPayMethod();
   var amt = Math.max(0, num(inp.value));
+  markDebtPaid(debtId, amt, method);
   closeModal();
-  if(isPaidOff){
-    // Already fully paid — treat Save as correcting how much (and how) that payment was made,
-    // not a new payment. Reverse the old effect, then apply the new one.
-    var oldAmt = num(debt.paidOffAmount), oldMethod = debt.lastPayMethod || "available";
-    if(oldAmt) reversePaymentEffect(view.y, view.m, oldMethod, oldAmt);
-    if(amt) applyPaymentEffect(view.y, view.m, method, amt);
-    debt.paidOffAmount = amt;
-    debt.lastPayMethod = method;
-    persist(); render(); showBalanceWarning();
-  } else {
-    payDebtBalance(debtPayId, amt, method);
-  }
+  if(!debt.usableAsPayment && num(debt.balance)<=0){ maybeShowDebtPayoffCongrats(debtId); return; }
+  showBalanceWarning();
 }
 function debtPayUnpay(){
-  if(debtPayId) unpayDebtBalance(debtPayId);
+  if(debtPayId) unmarkDebtPaid(debtPayId);
   closeModal();
+  showBalanceWarning();
 }
 function visibleDebtCreditItems(){
   return activeDebts().filter(function(d){
@@ -966,20 +1053,21 @@ function debtCreditCard(){
     + '<ul class="plain">' + items.map(debtCreditRowHtml).join("") + '</ul></section>';
 }
 function debtCreditRowHtml(d){
-  var bal = num(d.balance);
-  var isPaidOff = bal<=0;
-  var displayAmt = isPaidOff ? num(d.paidOffAmount) : bal;
-  var checkOnclick = isPaidOff ? "unpayDebtBalance('"+d.id+"')" : "quickPayDebtInFull('"+d.id+"')";
-  var checkAria = isPaidOff ? "Mark unpaid" : "Pay in full";
+  var due = debtFullAmountFor(d, view.y, view.m);
+  var isPaid = debtPaidAmount(d, view.y, view.m) !== null;
+  var subtitle = d.usableAsPayment ? "Credit" : "Loan";
+  if(d.payoffMethod==="full") subtitle += " · pay in full";
   return '<li><div class="bill-li">'
-    + '<button class="checkbtn'+(isPaidOff?" paid":"")+'" aria-label="'+checkAria+'" onclick="'+checkOnclick+'">'+(isPaidOff?icon("check",15):"")+'</button>'
+    + '<button class="checkbtn'+(isPaid?" paid":"")+'" aria-label="'+(isPaid?"Mark unpaid":"Mark paid")+'" onclick="toggleDebtPaid(\''+d.id+'\')">'+(isPaid?icon("check",15):"")+'</button>'
     + '<button class="bill-main" onclick="openDebtPay(\''+d.id+'\')">'
-    + '<div><div class="bill-name'+(isPaidOff?" done":"")+'">'+esc(d.name)+'</div>'
-    + '<div class="bill-cat"><span class="cat-dot" style="background:var(--pine)"></span>'+(d.usableAsPayment?"Credit":"Debt")+'</div></div>'
-    + '<div class="bill-amt"><div class="due tnum">'+usd(displayAmt)+'</div>'
-    + '<div class="status tnum" style="color:'+(isPaidOff?"var(--pine)":"var(--amber)")+'">'+(isPaidOff?"Paid":"Due")+'</div></div>'
+    + '<div><div class="bill-name'+(isPaid?" done":"")+'">'+esc(d.name)+'</div>'
+    + '<div class="bill-cat"><span class="cat-dot" style="background:var(--pine)"></span>'+subtitle+'</div></div>'
+    + '<div style="display:flex;align-items:center;gap:.5rem">'
+    + '<div class="bill-amt"><div class="due tnum">'+usd(due)+'</div>'
+    + '<div class="status tnum" style="color:'+(isPaid?"var(--pine)":"var(--amber)")+'">'+(isPaid?"Paid":"Due")+'</div></div>'
+    + '<i class="row-chev" aria-hidden="true" style="color:var(--sub);display:flex;flex:none">'+icon("right",15)+'</i>'
+    + '</div>'
     + '</button>'
-    + '<button style="all:unset;cursor:pointer;padding:0 .6rem;color:var(--sub);display:flex;align-items:center" aria-label="Edit '+esc(d.name)+'" onclick="openDebtForm(\''+d.id+'\')">'+icon("right",16)+'</button>'
     + '</div></li>';
 }
 /* A "semimonthly" bill has two independent due dates within the same month, each tracked
@@ -1010,6 +1098,10 @@ function restOfYear(){
     fundsList().forEach(function(f){
       if(!f.active) return;
       sum += Math.max(0, fundBudgetFor(f, view.y, m) - fundSpentInMonth(f, view.y, m));
+    });
+    visibleDebtCreditItems().forEach(function(d){
+      if(d.payoffMethod!=="fixed") return; // a "pay in full" balance can't be forecast this far out
+      sum += debtLeftOf(d, view.y, m);
     });
   }
   return sum;
@@ -1042,9 +1134,19 @@ function togglePaid(billId, occ){
   if(!b) return;
   var isPaid = leftOf(b,null,occ)===0;
   if(b.type==="variable"){
-    // Unpaid → don't silently charge the estimate; open the pay sheet so the real amount gets
-    // confirmed first. Paid → nothing left to confirm, so unmarking can happen in one tap.
-    if(isPaid) unmarkVariablePaid(billId, occ); else { openPay(billId, occ); return; }
+    // Checking trusts the estimate is close enough — mark it paid instantly, same as Fixed.
+    // If it needs correcting, the row is still tappable to open the form and edit the amount.
+    if(!isPaid){
+      var amt = num(b.estimate);
+      markVariablePaid(billId, amt, occ, undefined);
+      if(b.linkedGoalId) createGoalDeposit(b, view.y, view.m, occ, amt);
+      showBalanceWarning(); return;
+    }
+    // Unpaying a goal-linked bill also deletes its logged deposit — that's worth a beat to
+    // confirm, so open the pay sheet instead of doing it silently. A plain variable bill has
+    // nothing else riding on it, so unmarking can happen in one tap.
+    if(b.linkedGoalId){ openPay(billId, occ); return; }
+    unmarkVariablePaid(billId, occ);
   } else {
     if(isPaid) setLeft(billId, undefined, occ); else setLeft(billId, 0, occ);
   }
@@ -1201,6 +1303,7 @@ function monthBillListHtml(bills, data){
 function monthScreen(){
   var data = md(), bills = dueBills();
   var countable = bills.filter(function(b){ return !isSkipped(b, view.y, view.m); });
+  var debtItems = visibleDebtCreditItems();
   var totalDue=0, stillDue=0, paidCount=0;
   countable.forEach(function(b){
     if(b.freq==="semimonthly"){
@@ -1212,6 +1315,11 @@ function monthScreen(){
       if(l===0) paidCount++;
     }
   });
+  debtItems.forEach(function(d){
+    totalDue += debtDueAmount(d); stillDue += debtLeftOf(d, view.y, view.m);
+    if(debtLeftOf(d, view.y, view.m)===0) paidCount++;
+  });
+  var countableTotal = countable.length + debtItems.length;
   var cardsTotal = num(data.oneTime);
   var activeFunds = fundsList().filter(function(f){ return f.active; });
   var fundsLeft = activeFunds.reduce(function(s,f){
@@ -1229,21 +1337,27 @@ function monthScreen(){
     + '<button class="btn-round" aria-label="Next month" onclick="step(1)">'+icon("right",20)+'</button>'
     + '</div>'
     + '<div class="track"><div class="fill" style="width:'+pct+'%"></div></div>'
-    + '<div class="track-caption"><span>'+paidCount+' of '+countable.length+' bills paid</span>'
+    + '<div class="track-caption"><span>'+paidCount+' of '+countableTotal+' bills paid</span>'
     + '<span class="tnum">'+usd(totalDue-stillDue)+' of '+usd(totalDue)+'</span></div>'
     + '</section>';
 
   h += '<section class="card pad"><h2 class="eyebrow">My money</h2>'
-    + moneyRow("Available now (your balance)", data.balance, "patchMonthField('balance', this.value)")
-    + oneTimeExpenseRow(S.oneTimeName, data.oneTime)
+    + '<div class="hero" style="background:var(--pine-soft);margin-top:0;align-items:center">'
+    + '<span style="font-weight:600;font-size:.9rem">Available now</span>'
+    + '<div class="money" style="width:auto;background:var(--card);border:1px solid var(--line);padding:.35rem .7rem;border-radius:.6rem">'
+    + '<span style="font-size:1rem;font-weight:700;color:var(--pine)">$</span>'
+    + '<input class="tnum" inputmode="decimal" value="'+num(data.balance)+'" onchange="patchMonthField(\'balance\', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()" '
+    + 'style="font-weight:800;font-size:1.4rem;letter-spacing:-0.02em;color:var(--pine);text-align:right;background:transparent;border:none;padding:0;width:auto;max-width:130px">'
+    + '</div></div>'
+    + '<div style="margin-top:.65rem">'+oneTimeExpenseRow(S.oneTimeName, data.oneTime)+'</div>'
     + '<div class="divider"></div>'
     + '<div class="row"><span class="lbl">Still due this month</span>'
     + '<span class="tnum" style="font-weight:700;color:'+(stillDue>0?"var(--amber)":"var(--pine)")+'">'+usd(stillDue)+'</span></div>'
     + (activeFunds.length ? '<div class="row" style="margin-top:.4rem"><span class="lbl">Funds not yet spent</span>'
         + '<span class="tnum" style="font-weight:700;color:'+(fundsLeft>0?"var(--amber)":"var(--pine)")+'">'+usd(fundsLeft)+'</span></div>' : '')
-    + '<div class="hero" style="background:'+(afterAll>=0?"var(--pine-soft)":"var(--amber-soft)")+'">'
-    + '<span style="font-weight:600;font-size:.9rem">After bills, funds &amp; one-time expenses</span>'
-    + '<span class="amt tnum" style="color:'+(afterAll>=0?"var(--pine)":"var(--red)")+'">'+usd(afterAll)+'</span></div>'
+    + '<div class="divider" style="margin:.6rem 0"></div>'
+    + '<div class="row"><span class="lbl">Net remaining after bills &amp; funds</span>'
+    + '<span class="tnum" style="font-weight:700;color:'+(afterAll<0?"var(--red)":"var(--pine)")+'">'+usd(afterAll)+'</span></div>'
     + '<div class="row" style="margin-top:.6rem"><span class="muted" style="font-size:.75rem">Rest of '+view.y+' — left to fund</span>'
     + '<span class="tnum muted" style="font-size:.75rem;font-weight:600">'+usd(roy)+'</span></div>'
     + (cardsTotal>0
@@ -1301,22 +1415,23 @@ function monthBillRow(b, data, occ, subtitle){
   var skipped = isSkipped(b, view.y, view.m);
   var full = fullAmountFor(b, data, occ);
   var l = leftOf(b,data,occ), paid = !skipped && l===0, partial = !skipped && !paid && l<full;
-  var payFn = linked ? "openGoalBillPay" : "openPay";
-  var checkOnclick = skipped ? (payFn+"('"+b.id+"', "+occ+")") : (linked ? "openGoalBillPay('"+b.id+"', "+occ+")" : "togglePaid('"+b.id+"', "+occ+")");
+  var checkOnclick = skipped ? ("openPay('"+b.id+"', "+occ+")") : ("togglePaid('"+b.id+"', "+occ+")");
   var statusColor = skipped ? "var(--sub)" : (paid ? "var(--pine)" : "var(--amber)");
   var statusText = skipped ? "Skipped" : (paid ? "Paid" : (partial ? usd(l)+" left" : "Due"));
-  var checkAria = skipped ? "Skipped this month" : (paid ? "Mark unpaid" : (b.type==="variable" ? "Enter amount to mark paid" : "Mark paid"));
+  var checkAria = skipped ? "Skipped this month" : (paid ? "Mark unpaid" : "Mark paid");
   return '<li><div class="bill-li">'
     + '<button class="checkbtn'+(paid?" paid":"")+(skipped?" skipped":"")+'" aria-label="'+checkAria+'" onclick="'+checkOnclick+'">'+(skipped?icon("x",13):(paid?icon("check",15):""))+'</button>'
-    + '<button class="bill-main" onclick="'+payFn+'(\''+b.id+'\', '+occ+')">'
+    + '<button class="bill-main" onclick="openPay(\''+b.id+'\', '+occ+')">'
     + '<div><div class="bill-name'+(paid?" done":"")+'">'+esc(b.name)+(linked?' <span style="font-size:.7rem;font-weight:600;color:var(--pine)">→ goal</span>':'')+(b.type==="variable"&&!paid?' <span style="font-size:.7rem;font-weight:600;color:var(--sub)">est.</span>':'')+'</div>'
     + '<div class="bill-cat">'+(monthSort==="cat_group"
         ? (subtitle||'')
         : '<span class="cat-dot" style="background:'+catColor(b.category)+'"></span>'+esc(b.category)+(subtitle?' · '+subtitle:''))+'</div></div>'
+    + '<div style="display:flex;align-items:center;gap:.5rem">'
     + '<div class="bill-amt"><div class="due tnum">'+usd(full)+'</div>'
     + '<div class="status tnum" style="color:'+statusColor+'">'+statusText+'</div></div>'
+    + '<i class="row-chev" aria-hidden="true" style="color:var(--sub);display:flex;flex:none">'+icon("right",15)+'</i>'
+    + '</div>'
     + '</button>'
-    + (b.linkedDebtId ? '<button style="all:unset;cursor:pointer;padding:0 .6rem;color:var(--sub);display:flex;align-items:center" aria-label="Edit linked debt" onclick="openDebtForm(\''+b.linkedDebtId+'\')">'+icon("right",16)+'</button>' : '')
     + '</div></li>';
 }
 function monthBillRows(b, data){
@@ -2036,7 +2151,7 @@ function debtsReportBody(){
   h += '<section class="card">';
   S.debts.forEach(function(d, i){
     var paidOff = num(d.balance)<=0;
-    var status = d.active===false ? "Paused" : (paidOff ? "Paid off!" : (d.usableAsPayment?"Credit":"Debt"));
+    var status = d.active===false ? "Paused" : (paidOff ? "Paid off!" : (d.usableAsPayment?"Credit":"Loan"));
     h += (i>0 ? '<div class="divider"></div>' : '')
       + '<button style="width:100%;text-align:left;display:block;padding:.85rem 1rem'+(i===0?' 0':'')+'" onclick="openDebtForm(\''+d.id+'\')">'
       + '<div class="row" style="margin-bottom:.4rem">'
@@ -2909,10 +3024,11 @@ function openJournalForm(id){
     + '<input id="jfAmount" class="tnum" inputmode="decimal" value="'+(e?num(e.amount):"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
     + '</div>'
     + '<div class="fgroup"><label class="flabel">Date</label>'
-    + '<input id="jfDate" type="date" class="field" value="'+esc(date)+'" oninput="jfMethodChanged()"></div>'
+    + '<input id="jfDate" type="date" class="field" value="'+esc(date)+'" oninput="jfMethodChanged();jfFundChanged()"></div>'
     + '<div class="fgroup"><label class="flabel">Fund</label>'
-    + '<select id="jfFund" class="field">'+fundOpts+'</select>'
-    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Keeps reports accurate — new funds are set up from Bills. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-spending-needs-fund\')">More info</button></p></div>'
+    + '<select id="jfFund" class="field" onchange="jfFundChanged()">'+fundOpts+'</select>'
+    + '<p id="jfFundBalance" class="muted" style="font-size:.72rem;font-weight:500;margin-top:.35rem">'+jfFundBalance(fundId, date)+'</p>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.25rem">Keeps reports accurate — new funds are set up from Bills. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-spending-needs-fund\')">More info</button></p></div>'
     + '<div id="jfUnplannedWrap" class="fgroup"><button class="field row" style="cursor:pointer" onclick="jfUnplannedToggle(this)">'
     + '<span id="jfUnplannedLbl" style="font-size:.875rem;font-weight:500">Unplanned</span>'
     + '<span id="jfUnplanned" class="toggle'+(unplanned?" on":"")+'" data-on="'+(unplanned?1:0)+'"><span class="knob"></span></span></button>'
@@ -2927,6 +3043,31 @@ function openJournalForm(id){
     + (e ? '<button id="jfDel" class="btn btn-danger" style="width:100%;margin-top:.5rem" onclick="jfDelete()">Delete this entry</button>' : ''));
 }
 function jfRefreshBalanceLabel(){ jfMethodChanged(); }
+// Shows what's left in a fund for the entry's month, so you can see it before hitting save
+// instead of having to guess or go check the Bills tab. Backs out this same entry's own prior
+// amount when editing, so it reads what would be left after this save, not double-counted.
+function jfFundBalance(fundId, date){
+  var fund = fundsList().filter(function(f){ return f.id===fundId; })[0];
+  if(!fund) return "";
+  var fd = new Date(date+"T00:00:00");
+  if(isNaN(fd)) return "";
+  var fy = fd.getFullYear(), fm = fd.getMonth()+1;
+  var spentSoFar = fundSpentInMonth(fund, fy, fm);
+  var prev = jEditId ? S.journal.filter(function(x){ return x.id===jEditId; })[0] : null;
+  if(prev && prev.fundId===fund.id && !prev.unplanned){
+    var prevD = new Date(prev.date+"T00:00:00");
+    if(!isNaN(prevD) && prevD.getFullYear()===fy && (prevD.getMonth()+1)===fm) spentSoFar -= num(prev.amount);
+  }
+  var remaining = num(fund.budget) - spentSoFar;
+  return usd(remaining) + " left this month" + (remaining<0 ? " (already over budget)" : "");
+}
+function jfFundChanged(){
+  var fundSel = document.getElementById("jfFund");
+  var dateInp = document.getElementById("jfDate");
+  var note = document.getElementById("jfFundBalance");
+  if(!fundSel || !note) return;
+  note.textContent = jfFundBalance(fundSel.value, dateInp ? dateInp.value : "");
+}
 // Reverses whatever effect a saved entry actually had, whichever shape it was saved under —
 // the old always-on balance toggle, the old direct-debt-payment mode, or the current
 // chargeMethod field. Shared by jfSave (replacing a prior save) and jfDelete.
@@ -3066,17 +3207,18 @@ function goalDepositEntry(billId, y, m, occ){
     return e.billLink && e.billLink.billId===billId && e.billLink.y===y && e.billLink.m===m && e.billLink.occ===(occ||1);
   })[0];
 }
-function createGoalDeposit(b, y, m, occ){
+function createGoalDeposit(b, y, m, occ, amount){
   if(!b.linkedGoalId) return;
   if(!S.savingsGoals.some(function(g){ return g.id===b.linkedGoalId; })) return; // linked goal was deleted — behave like a normal bill
+  var amt = amount===undefined ? fullAmountFor(b, monthDataAt(y,m), occ) : num(amount);
   var existing = goalDepositEntry(b.id, y, m, occ);
-  if(existing) return; // already logged, don't double up
+  if(existing){ existing.amount = amt; return; } // already logged — update to the corrected amount instead of duplicating
   S.savingsEntries.push({
     id: "s"+Date.now(),
     date: new Date().toISOString().slice(0,10),
     note: "",
     type: "deposit",
-    amount: fullAmountFor(b, monthDataAt(y,m), occ),
+    amount: amt,
     goalId: b.linkedGoalId,
     billLink: { billId:b.id, y:y, m:m, occ:occ||1 }
   });
@@ -3343,6 +3485,15 @@ function sgSave(){
   activeSavingsGoalId = goal.id;
   billsList().forEach(function(b){ if(b.linkedGoalId===goal.id) b.category = "→ "+goal.name; });
   persist(); closeModal(); render();
+  if(!found) sgOfferBill(goal.id);
+}
+function sgOfferBill(goalId){
+  var goal = S.savingsGoals.filter(function(g){ return g.id===goalId; })[0];
+  if(!goal) return;
+  modal("Contribute monthly?",
+    '<p class="muted" style="font-size:.875rem;margin-bottom:1rem">Want a monthly bill on your Month tab to remind you to put money toward <b style="color:var(--ink)">'+esc(goal.name)+'</b>?</p>'
+    + '<button class="btn btn-pine" style="width:100%;margin-bottom:.5rem" onclick="closeModal();openExpenseForm(null,\'variable\',\''+esc(goalId)+'\')">Yes, set it up</button>'
+    + '<button class="btn btn-ghost" style="width:100%" onclick="closeModal()">Not now</button>');
 }
 function sgDelete(){
   if(!goalConfirmDel){
@@ -3679,8 +3830,8 @@ var UPDATE_LOG = [
     notes: [
       "Bills and Funds are now one \"Expense\" type, added from a single form: Fixed (a known amount, due on a schedule — rent, insurance), Variable (due on a schedule but the amount changes — set an estimate, then adjust what's still owed up or down anytime, paid or not), or Fund (a monthly budget for spending that varies, like groceries or gas).",
       "Spending entries always tie to a Fund now — no free-text category, and Bills can no longer be logged against directly. An \"Unplanned\" checkbox handles spending beyond a fund's budget: it still counts in reports under that fund's category, but never pushes the fund's remaining below $0.",
-      "A Fixed or Variable expense can be linked to a savings goal instead of a regular category — marking it paid in full logs a matching deposit automatically (all-or-nothing, no partial payments). Unpaying or deleting either side asks first, since it undoes the other.",
-      "\"Skip this month\" is available on any bill's pay screen, for a month you're not paying it, without pausing the expense entirely or having it sit looking overdue.",
+      "An expense can be linked to a savings goal instead of a regular category — goal-linked expenses are always Variable, so some months you can log less (or more) than budgeted. Checking it off logs a matching deposit at the estimate; unpaying it asks first, since that deletes the deposit.",
+      "\"Skip this month\" is available on any Variable bill's pay screen, for a month you're not paying it, without pausing the expense entirely or having it sit looking overdue. Fixed bills don't get this option, since a fixed amount doesn't stop being owed just because it's deferred.",
       "Marking a Fixed or Variable expense paid always reduces Available now by the amount actually paid — no separate step to remember. An optional toggle does the same for Unplanned spending.",
       "The Month screen's balance math now includes Funds, not just Bills — an unspent fund budget holds back Available now the same way an unpaid bill does.",
       "A savings withdrawal can't take a goal below $0 — Billfold caps it and states the most you can actually withdraw. The same floor applies to Funds: they can't go negative.",
@@ -3849,7 +4000,7 @@ function goalsSettingsCard(){
   return h;
 }
 function debtsListMarkup(){
-  var h = '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem"><b>Payment options</b> are revolving credit (a card or line of credit) usable elsewhere in the app alongside Available Balance. <b>Other debt</b> is a fixed-purpose loan you\'re just tracking the payoff of — nothing gets charged to these. Just a running balance you correct by hand against your statement — no interest math. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-debt-credit\')">More info</button></p>';
+  var h = '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem"><b>Credit</b> is revolving — a card or line of credit usable elsewhere in the app alongside Available Balance, with a choice of paying it in full each month or a set amount. <b>Loans</b> are fixed-purpose — you\'re just tracking the payoff, nothing gets charged to these, and it\'s always a set monthly payment. Just a running balance you correct by hand against your statement — no interest math. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-debt-credit\')">More info</button></p>';
   if(!S.debts.length){
     return h + '<button class="btn btn-pine" style="width:100%" onclick="openDebtForm(null)">+ Add debt or credit</button>';
   }
@@ -3864,12 +4015,12 @@ function debtsListMarkup(){
   var options = S.debts.filter(function(d){ return d.usableAsPayment; });
   var other = S.debts.filter(function(d){ return !d.usableAsPayment; });
   if(options.length){
-    h += '<h3 style="font-size:.8rem;font-weight:700;margin-bottom:.4rem">Payment options</h3>'
+    h += '<h3 style="font-size:.8rem;font-weight:700;margin-bottom:.4rem">Credit</h3>'
       + '<ul class="plain">' + options.map(debtRow).join("") + '</ul>';
   }
   if(other.length){
     h += (options.length ? '<div class="divider"></div>' : '')
-      + '<h3 style="font-size:.8rem;font-weight:700;margin-bottom:.4rem">Other debt</h3>'
+      + '<h3 style="font-size:.8rem;font-weight:700;margin-bottom:.4rem">Loans</h3>'
       + '<ul class="plain">' + other.map(debtRow).join("") + '</ul>';
   }
   h += '<button class="btn btn-pine" style="width:100%;margin-top:.75rem" onclick="openDebtForm(null)">+ Add debt or credit</button>';
@@ -3882,26 +4033,67 @@ function openDebtForm(id){
   if(!d && id){ id = null; debtEditId = null; }
   var active = d ? d.active!==false : true;
   var usable = d ? !!d.usableAsPayment : false;
+  var payoffMethod = d ? (d.payoffMethod || (usable ? "full" : "fixed")) : "full";
+  var monthlyPayment = d && d.monthlyPayment ? num(d.monthlyPayment) : "";
   modal(d ? "Edit debt / credit" : "Add debt or credit",
     '<div class="fgroup"><label class="flabel">Name</label>'
     + '<input id="dtName" class="field" value="'+(d?esc(d.name):"")+'" placeholder="e.g. Car loan, Visa card"></div>'
+    + '<div class="fgroup" style="margin-top:.9rem"><label class="flabel">Type</label>'
+    + '<input type="hidden" id="dtUsable" value="'+(usable?"1":"0")+'">'
+    + '<div class="seg" style="width:100%">'
+    + '<button id="dtSegLoan" style="flex:1" class="'+(!usable?"on":"")+'" onclick="dtTypeChange(false)">Loan</button>'
+    + '<button id="dtSegCredit" style="flex:1" class="'+(usable?"on":"")+'" onclick="dtTypeChange(true)">Credit</button>'
+    + '</div>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Credit is revolving — a card or line of credit that bills or spending can be charged to, and that stays visible at $0 once it\'s carried a balance. A loan is fixed-purpose — a car loan, a mortgage — can\'t be charged to, and drops off once it\'s paid off. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-debt-credit\')">More info</button></p></div>'
+    + '<div class="fgroup" style="margin-top:.9rem" id="dtPayoffWrap">'+dtPayoffBlockHtml(usable, payoffMethod, monthlyPayment)+'</div>'
     + '<div class="fgroup" style="margin-top:.9rem"><label class="flabel">Current balance</label>'
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
     + '<input id="dtBalance" class="tnum" inputmode="decimal" value="'+(d?num(d.balance):"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
-    + '<p class="muted" style="font-size:.72rem;margin:.35rem 0 .9rem">A running total you correct by hand against your statement — no interest math, no schedule. Pay it down (in full or in part) from the Month tab; it carries over month to month until it\'s cleared. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-debt-credit\')">More info</button></p>'
-    + '<div class="grid2">'
+    + '<p class="muted" style="font-size:.72rem;margin:.35rem 0 .9rem">A running total you correct by hand against your statement — no interest math. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-debt-credit\')">More info</button></p>'
     + '<div class="fgroup"><label class="flabel">Status</label><button class="field row" style="cursor:pointer" onclick="dtToggleActive(this)">'
     + '<span style="font-size:.875rem;font-weight:500">Active<span id="dtActiveBadge" style="font-size:.7rem;font-weight:500;padding:.1rem .35rem;border-radius:.25rem;background:var(--line);color:var(--sub);margin-left:.4rem'+(active?';display:none':'')+'">Paused</span></span>'
     + '<span id="dtActive" class="toggle'+(active?" on":"")+'" data-on="'+(active?1:0)+'"><span class="knob"></span></span></button></div>'
-    + '<div class="fgroup"><label class="flabel" style="visibility:hidden">Status</label><button class="field row" style="cursor:pointer" onclick="dtToggleUsable(this)">'
-    + '<span style="font-size:.875rem;font-weight:500">Payment option</span>'
-    + '<span id="dtUsable" class="toggle'+(usable?" on":"")+'" data-on="'+(usable?1:0)+'"><span class="knob"></span></span></button></div>'
-    + '</div>'
-    + '<p class="muted" style="font-size:.72rem;margin:.35rem 0 .9rem">Active pauses without losing history. Payment option flags revolving credit (a card) as somewhere bills or spending can be charged to, and keeps it visible on the Month tab even at $0 — leave off for a fixed-purpose loan, which drops off the list once paid off. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-debt-credit\')">More info</button></p>'
     + '<p id="dtErr" class="msg-err" style="display:none"></p>'
-    + '<button class="btn btn-pine" style="width:100%;margin-top:.5rem;padding:.8rem" onclick="dtSave()">'+(d?"Save changes":"Add debt")+'</button>'
+    + '<button class="btn btn-pine" style="width:100%;margin-top:.9rem;padding:.8rem" onclick="dtSave()">'+(d?"Save changes":"Add debt")+'</button>'
     + (d ? '<button id="dtDel" class="btn btn-danger" style="width:100%;margin-top:.5rem" onclick="dtDelete()">Delete this debt</button>'
          + '<p class="muted" style="font-size:.72rem;margin-top:.5rem">Spending entries already logged against it stay on record.</p>' : ''));
+}
+// Loans are always a fixed monthly payment — there's no live-balance "pay in full" concept for
+// them, so it isn't offered as a choice. Credit gets the real choice between the two.
+function dtPayoffBlockHtml(usable, payoffMethod, monthlyPayment){
+  var mpField = '<div style="margin-top:.6rem"><label class="flabel">Monthly payment</label>'
+    + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
+    + '<input id="dtMonthlyPayment" class="tnum" inputmode="decimal" value="'+(monthlyPayment===""?"":monthlyPayment)+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>';
+  if(!usable){
+    return mpField + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Shows up on the Month tab each month as this amount due — pay more there anytime for an extra payment.</p>';
+  }
+  return '<input type="hidden" id="dtPayoffMethod" value="'+payoffMethod+'">'
+    + '<label class="flabel">Monthly payment plan</label>'
+    + '<div class="seg" style="width:100%">'
+    + '<button id="dtSegFull" style="flex:1" class="'+(payoffMethod==="full"?"on":"")+'" onclick="dtPayoffChange(\'full\')">Balance in full</button>'
+    + '<button id="dtSegFixed" style="flex:1" class="'+(payoffMethod==="fixed"?"on":"")+'" onclick="dtPayoffChange(\'fixed\')">Set amount</button>'
+    + '</div>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">'+(payoffMethod==="full"
+        ? "Each month's bill defaults to whatever the current balance is — checking it off pays it off completely. New charges after that reopen it, showing whatever's newly owed."
+        : "Each month's bill is the fixed amount below, no matter what the balance is. New charges just add to the balance without changing it.")+'</p>'
+    + (payoffMethod==="fixed" ? mpField : '');
+}
+function dtTypeChange(usable){
+  var usableEl = document.getElementById("dtUsable");
+  if(usableEl) usableEl.value = usable ? "1" : "0";
+  var loanSeg = document.getElementById("dtSegLoan"), creditSeg = document.getElementById("dtSegCredit");
+  if(loanSeg) loanSeg.className = !usable ? "on" : "";
+  if(creditSeg) creditSeg.className = usable ? "on" : "";
+  var mpInput = document.getElementById("dtMonthlyPayment");
+  var curMp = mpInput ? mpInput.value : "";
+  var wrap = document.getElementById("dtPayoffWrap");
+  if(wrap) wrap.innerHTML = dtPayoffBlockHtml(usable, usable ? "full" : "fixed", curMp);
+}
+function dtPayoffChange(method){
+  var mpInput = document.getElementById("dtMonthlyPayment");
+  var curMp = mpInput ? mpInput.value : "";
+  var wrap = document.getElementById("dtPayoffWrap");
+  if(wrap) wrap.innerHTML = dtPayoffBlockHtml(true, method, curMp);
 }
 function dtToggleActive(btn){
   var t = document.getElementById("dtActive");
@@ -3910,26 +4102,27 @@ function dtToggleActive(btn){
   var badge = document.getElementById("dtActiveBadge");
   if(badge) badge.style.display = on ? "" : "none";
 }
-function dtToggleUsable(btn){
-  var t = document.getElementById("dtUsable");
-  var on = t.getAttribute("data-on")==="1";
-  t.className = "toggle"+(on?"":" on"); t.setAttribute("data-on", on?"0":"1");
-}
 function dtSave(){
   var name = document.getElementById("dtName").value.trim();
   var balance = num(document.getElementById("dtBalance").value);
   var activeEl = document.getElementById("dtActive");
   var active = !!(activeEl && activeEl.getAttribute("data-on")==="1");
   var usableEl = document.getElementById("dtUsable");
-  var usableAsPayment = !!(usableEl && usableEl.getAttribute("data-on")==="1");
+  var usableAsPayment = !!(usableEl && usableEl.value==="1");
+  var pmEl = document.getElementById("dtPayoffMethod");
+  var payoffMethod = usableAsPayment ? ((pmEl && pmEl.value) || "full") : "fixed";
+  var mpInput = document.getElementById("dtMonthlyPayment");
+  var monthlyPayment = mpInput ? num(mpInput.value) : 0;
   var err = document.getElementById("dtErr");
   function fail(m){ err.textContent=m; err.style.display="block"; }
   if(!name) return fail("Give the debt a name.");
   if(balance<0) return fail("Balance can't be negative.");
+  if(payoffMethod==="fixed" && monthlyPayment<=0) return fail("Set a monthly payment amount greater than $0.");
   var prior = debtEditId ? S.debts.filter(function(x){return x.id===debtEditId;})[0] : null;
   var debt = { id: debtEditId || ("debt"+Date.now()), name:name, balance:balance, active:active, usableAsPayment:usableAsPayment,
+    payoffMethod: payoffMethod, monthlyPayment: monthlyPayment,
     everCarriedBalance: (prior && prior.everCarriedBalance) || balance>0,
-    paidOffAmount: prior ? prior.paidOffAmount : 0, lastPayMethod: prior ? prior.lastPayMethod : undefined,
+    paidMonths: prior ? (prior.paidMonths||{}) : {}, payMethodByMonth: prior ? (prior.payMethodByMonth||{}) : {},
     defaultPayMethod: prior ? prior.defaultPayMethod : undefined };
   var found = false;
   S.debts = S.debts.map(function(x){ if(x.id===debt.id){ found=true; return debt; } return x; });
@@ -3956,13 +4149,13 @@ var HELP_ITEMS = [
   { id:"help-spending-needs-fund", title:"Why every spending entry needs a fund",
     body:"Every spending entry ties to a Fund, with an “Unplanned” checkbox for anything beyond that fund's budget. There's no free-text category here on purpose — a fund's budget limit only means something if spending can't quietly slip past it under a different label. Fixed and Variable expenses aren't selectable from spending entries at all; they're tracked through their own pay screen instead." },
   { id:"help-track-paid", title:"Track what's paid",
-    body:"Open the Month tab. Every Fixed or Variable expense due that month shows up on its own, pulled straight from your Bills list. For a Fixed expense, tap the circle to mark it paid in full or tap the expense itself to enter a partial amount. A Variable expense works a little differently, since the amount isn't known ahead of time: tap it, enter the real amount, and confirm — there's no separate “paid in full” shortcut, since there's no such thing as “full” until you've told Billfold what the bill actually was. Once marked paid, you can still correct the amount if you got it wrong; the difference adjusts Available now (or your card's balance — see below). “Mark unpaid” undoes it cleanly, reversing exactly what was charged. If you have a debt or line of credit flagged as a payment option in Setup, a “Pay with” choice shows up on ordinary Fixed and Variable expenses — pick Available Balance or that card, and the amount routes there instead: a card charge adds to its balance rather than touching your cash. Pick a card and check “Set as default for this bill” to have it pre-selected every month going forward, instead of defaulting back to Available Balance each time — or set “Usually paid with” right on the expense itself, from Bills → edit the expense, which does the same thing without waiting until you're paying it. A bill linked to a debt's own monthly payment doesn't get this choice; it always pays from Available Balance and runs its own interest/principal split. Either type can be skipped for the month instead — tap “Skip this month” from its pay screen; a skipped expense won't count toward what's due, and any reminder for it stays quiet. Expenses linked to a savings goal work a little differently — see “Expenses that feed a savings goal” below." },
+    body:"Open the Month tab. Every Fixed or Variable expense due that month shows up on its own, pulled straight from your Bills list. For a Fixed expense, tap the circle to mark it paid in full or tap the expense itself to enter a partial amount. Tapping the circle on a Variable expense marks it paid using the current estimate, since that's usually close enough — if it isn't, tap the expense itself instead to enter the real amount before (or after) confirming it. “Mark unpaid” undoes either cleanly, reversing exactly what was charged; unpaying a Variable expense is a single tap. Once marked paid, you can still correct a Variable amount if you got it wrong; the difference adjusts Available now (or your card's balance — see below). If you have a debt or line of credit flagged as a payment option in Setup, a “Pay with” choice shows up on ordinary Fixed and Variable expenses — pick Available Balance or that card, and the amount routes there instead: a card charge adds to its balance rather than touching your cash. Pick a card and check “Set as default for this bill” to have it pre-selected every month going forward, instead of defaulting back to Available Balance each time — or set “Usually paid with” right on the expense itself, from Bills → edit the expense, which does the same thing without waiting until you're paying it. A bill linked to a debt's own monthly payment doesn't get this choice; it always pays from Available Balance and runs its own interest/principal split. Variable expenses can also be skipped for the month — tap “Skip this month” from its pay screen; a skipped expense won't count toward what's due, and any reminder for it stays quiet. Fixed expenses don't offer Skip, since a fixed amount doesn't stop being owed just because it's deferred — pause the expense instead if it's stopping for good. Expenses linked to a savings goal work a little differently — see “Expenses that feed a savings goal” below." },
   { id:"help-savings-goal", title:"Save toward a goal",
     body:"Go to Settings → Setup (or add one the first time you open Billfold) to name a goal and set a target — you can keep up to 5 at a time. Log deposits and withdrawals against a goal from Log → Savings; each goal's card shows what's saved, what's left, and how close you are. A withdrawal can't take a goal below $0 — Billfold will cap it and tell you the most you can actually withdraw. Tap a goal any time to edit its target or delete it — deleting keeps its logged deposits on record, grouped under “Other.”" },
   { id:"help-goal-linked-expense", title:"Expenses that feed a savings goal",
-    body:"If you already treat a recurring transfer — a travel fund, an emergency fund — like a bill, link it to a goal instead of a regular category when adding or editing a Fixed or Variable expense: pick the goal from the “Savings goals” group in the Category list. Marking a goal-linked expense paid in full logs a matching deposit automatically; it's all-or-nothing, so partial payments aren't supported. Unpaying it, or deleting the deposit it created, will ask first, since undoing one side undoes the other. Didn't make the transfer this month? Tap “Skip this month” instead of marking it paid — nothing gets logged." },
+    body:"If you already treat a recurring transfer — a travel fund, an emergency fund — like a bill, link it to a goal instead of a regular category when adding or editing an expense: pick the goal from the “Savings goals” group in the Category list. Goal-linked expenses are always Variable, so some months you can contribute less (or more) than budgeted — tap the expense itself to adjust the amount before confirming, the same as any other Variable expense. Tapping the circle marks it paid at the estimate and logs a matching deposit; editing the amount afterward updates that deposit to match. Unpaying it opens the pay screen to confirm first, since it deletes the deposit — checking it back off, on the other hand, is instant. Didn't make the transfer this month? Tap “Skip this month” instead — nothing gets logged." },
   { id:"help-debt-credit", title:"Track debt & credit",
-    body:"Go to Settings → Setup to add a loan or card balance: current balance, interest rate (APR), and a monthly payment amount (leave the payment at $0 if the balance is too — nothing gets billed until there's something to pay down). That payment becomes a Fixed bill on your Month screen automatically — marking it paid charges one month of interest on the current balance, then applies the rest to principal. Want to pay extra? Log it from Log → Spending and pick the debt instead of a Fund — extra payments go 100% to principal. Flip on “Usable as a payment option” for revolving credit — a card or line of credit — you'd actually want to pay other bills or spending with; leave it off for a loan with a fixed purpose, like a car or personal loan. Adjust the balance, rate, or payment anytime from Settings → Setup; the linked bill stays in sync. See total remaining, each debt's balance, and an estimated payoff date under Tools → Reports → Debts. Best suited to credit cards, personal loans, and auto loans — not mortgages, since this assumes the whole payment is principal &amp; interest (no escrow) at a flat monthly rate, not your loan's actual amortization schedule." },
+    body:"Go to Settings → Setup to add a loan or card: a name, a Type (Credit or Loan), and a current balance — no interest rate, no amortization, just a running total you correct by hand against your statement. Credit is revolving — a card or line of credit — and gets a choice of payoff method: “Balance in full” (the Month tab bill defaults to whatever the live balance is; checking it off zeroes it out) or “Set amount” (a fixed monthly payment you choose, same as a regular bill). A Loan can't be charged to and is always a set monthly payment, since there's no live balance to pay in full against. Either way, it shows up on the Month tab in its own “Credit & debt” section at the top — check it off to pay the default amount, or tap it to enter something different, including an extra or partial payment; editing the debt itself (name, type, payoff method, balance) is one tap away from there too. A “Balance in full” card that's already marked paid this month automatically reopens if a new charge comes in, showing whatever's newly owed — a “Set amount” debt or loan isn't affected by new charges at all, since its bill is a fixed target regardless of balance. Picking Credit as the Type is what makes it chargeable from bills or spending; a loan never gets that option. See total remaining and each debt's balance under Tools → Reports → Debts." },
   { id:"help-backup", title:"Back up and move your data",
     body:"Everything saves automatically on this device as you use it — there's nothing to press. To keep a safety copy, or move your data to a new phone, go to Settings → Back up & restore and choose a name and where to save the file — using the same name each time and choosing “Replace” if asked keeps you at one current copy instead of piling up old ones. On the new device, open Billfold and use Settings → Back up & restore → Restore to load it back in. Restoring replaces what's already on that device, so restore before making new edits there." },
   { id:"help-tabs-overview", title:"What each tab does",
@@ -3985,7 +4178,7 @@ function setHelpSearch(input){
 function clearHelpSearch(){ helpSearchQuery = ""; render(); }
 var GLOSSARY_ITEMS = [
   { term:"Fixed expense", def:"A known amount, due on a schedule — rent, a subscription, insurance. Marking it paid always reduces Available now.", linkLabel:"Add a fixed expense", onclick:"billsSubMode='bills';go('bills');openExpenseForm(null,'fixed')" },
-  { term:"Variable expense", def:"Due on a schedule, but the amount changes — set an estimate, then enter the real amount and confirm when it's actually due. No partial payments; it's either unpaid (showing the estimate) or paid (showing what you confirmed), and you can correct that amount anytime while it's marked paid.", linkLabel:"Add a variable expense", onclick:"billsSubMode='bills';go('bills');openExpenseForm(null,'variable')" },
+  { term:"Variable expense", def:"Due on a schedule, but the amount changes — checking it off marks it paid using the current estimate, or tap it first to enter the real amount before confirming. No partial payments; it's either unpaid (showing the estimate) or paid (showing what you confirmed), and you can correct that amount anytime while it's marked paid.", linkLabel:"Add a variable expense", onclick:"billsSubMode='bills';go('bills');openExpenseForm(null,'variable')" },
   { term:"Fund", def:"A monthly budget for a category of spending that varies, like groceries or gas — the only thing spending entries can pull from.", linkLabel:"Set up a fund", onclick:"billsSubMode='funds';go('bills');openExpenseForm(null,'fund')" },
   { term:"Spending entry", def:"A single day-to-day expense logged in your ledger, always tied to a Fund — check “Unplanned” if it goes beyond that fund's budget.", linkLabel:"Log a spending entry", onclick:"trackMode='journal';go('track');openJournalForm(null)" },
   { term:"Savings entry", def:"A deposit or withdrawal logged against one of your savings goals.", linkLabel:"Log a savings entry", onclick:"trackMode='savings';go('track');openSavingsEntryForm(null)" },
@@ -4128,6 +4321,12 @@ function openPay(id, occ){
     : '';
 
   if(isVar){
+    var goal = b.linkedGoalId ? S.savingsGoals.filter(function(g){ return g.id===b.linkedGoalId; })[0] : null;
+    var goalNote = !b.linkedGoalId ? ""
+      : goal ? (isPaid
+          ? 'Editing the amount above and saving also updates the matching deposit to <b style="color:var(--ink)">'+esc(goal.name)+'</b>.'
+          : 'Confirming this also logs a matching deposit to <b style="color:var(--ink)">'+esc(goal.name)+'</b>.')
+        : 'The savings goal this was linked to no longer exists, so this behaves like a normal bill — no deposit will be logged.';
     modal(esc(b.name),
       topBlock
       + (skipped ? '<p style="font-size:.85rem;font-weight:600;margin-bottom:1rem">Skipped this month — nothing due.</p>' : '')
@@ -4141,8 +4340,9 @@ function openPay(id, occ){
       + '<p class="muted" style="font-size:.75rem;margin-top:.5rem">'
       + (isPaid ? "Marked paid. Edit the amount and save to correct it — the difference adjusts Available now."
                 : "Estimated "+usd(b.estimate)+". Enter the real amount if it's different, then confirm — that\u2019s what moves Available now.")
+      + (goalNote ? " "+goalNote : "")
       + '</p>'
-      + (isPaid ? '<button class="btn btn-ghost" style="width:100%;margin-top:.5rem" onclick="varPayClear()">Mark unpaid</button>' : '')
+      + (isPaid ? '<button id="varUnpayBtn" class="btn btn-ghost" style="width:100%;margin-top:.5rem" onclick="varPayClear()">Mark unpaid'+(b.linkedGoalId&&goal?" (deletes the deposit)":"")+'</button>' : '')
       + '<div class="divider" style="margin:1rem 0"></div>'
       + '<button class="btn btn-ghost" style="width:100%" onclick="billSkipToggle()">'+(skipped?"Clear skip — due again this month":"Skip this month")+'</button>');
     var vinp = document.getElementById("payInput");
@@ -4164,8 +4364,8 @@ function openPay(id, occ){
     + '<button class="btn btn-ink" onclick="paySave()"'+(skipped?' disabled':'')+'>Save</button></div>'
     + methodBlock
     + '<p class="muted" style="font-size:.75rem;margin-top:.5rem">Enter 0 when it\'s paid.'+(l===0&&!skipped?' This bill is currently marked paid.':'')+'</p>'
-    + '<div class="divider" style="margin:1rem 0"></div>'
-    + '<button class="btn btn-ghost" style="width:100%" onclick="billSkipToggle()">'+(skipped?"Clear skip — due again this month":"Skip this month")+'</button>');
+    + (skipped ? ('<div class="divider" style="margin:1rem 0"></div>'
+      + '<button class="btn btn-ghost" style="width:100%" onclick="billSkipToggle()">Clear skip — due again this month</button>') : ''));
   var inp = document.getElementById("payInput");
   if(inp && !skipped){ inp.focus(); inp.select(); }
 }
@@ -4198,11 +4398,24 @@ function applyDefaultMethodIfRequested(billId){
 }
 function varPaySave(){
   var inp = document.getElementById("payInput");
-  if(payId!==null && inp){ applyDefaultMethodIfRequested(payId); markVariablePaid(payId, num(inp.value), payOcc, getPayMethod()); }
+  if(payId!==null && inp){
+    var b = billsList().filter(function(x){return x.id===payId;})[0];
+    applyDefaultMethodIfRequested(payId);
+    var amt = num(inp.value);
+    markVariablePaid(payId, amt, payOcc, getPayMethod());
+    if(b && b.linkedGoalId) createGoalDeposit(b, view.y, view.m, payOcc, amt);
+  }
   closeModal(); showBalanceWarning();
 }
 function varPayClear(){
-  if(payId!==null) unmarkVariablePaid(payId, payOcc);
+  if(payId!==null){
+    var b = billsList().filter(function(x){return x.id===payId;})[0];
+    if(b && b.linkedGoalId){
+      var entry = goalDepositEntry(payId, view.y, view.m, payOcc);
+      if(entry) deleteGoalDeposit(payId, view.y, view.m, payOcc);
+    }
+    unmarkVariablePaid(payId, payOcc);
+  }
   closeModal(); showBalanceWarning();
 }
 function paySet(v){
@@ -4219,58 +4432,10 @@ function paySave(){
   closeModal();
   showBalanceWarning();
 }
-/* --- goal-linked bills: their own pay modal — all-or-nothing, plus a skip-this-month option --- */
-var goalUnpayArmed = false;
-function openGoalBillPay(id, occ){
-  payId = id; payOcc = occ || 1;
-  goalUnpayArmed = false;
-  var b = billsList().filter(function(x){return x.id===id;})[0];
-  if(!b) return;
-  var goal = S.savingsGoals.filter(function(g){ return g.id===b.linkedGoalId; })[0];
-  var y = view.y, m = view.m;
-  var data = touchMonth();
-  var full = fullAmountFor(b, data, payOcc);
-  var skipped = isSkipped(b, y, m);
-  var paid = !skipped && leftOf(b, data, payOcc)===0;
-  var occNote = b.freq==="semimonthly" ? (payOcc===2 ? " · 2nd payment" : " · 1st payment") : "";
-  var depositNote = goal
-    ? 'Marking this paid logs a '+usd(full)+' deposit to <b style="color:var(--ink)">'+esc(goal.name)+'</b>. Partial payments aren\'t supported for goal-linked bills.'
-    : 'The savings goal this bill was linked to no longer exists, so marking it paid now behaves like a normal bill — no deposit will be logged.';
-  modal(esc(b.name),
-    '<p class="muted" style="font-size:.875rem;margin-bottom:.75rem">'+usd(full)+' · '+freqText(b)+occNote+'</p>'
-    + '<p class="muted" style="font-size:.8rem;margin-bottom:1rem">'+depositNote+'</p>'
-    + (skipped ? '<p style="font-size:.85rem;font-weight:600;margin-bottom:1rem">Skipped this month — nothing due, nothing logged.</p>' : '')
-    + (paid
-        ? '<button id="goalUnpayBtn" class="btn btn-ghost" style="width:100%;margin-bottom:.5rem" onclick="goalBillUnpay()">Mark not paid</button>'
-        : '<button class="btn btn-pine" style="width:100%;margin-bottom:.5rem" onclick="goalBillMarkPaid()"'+(skipped?' disabled':'')+'>'+icon("check",16)+' Mark paid in full</button>')
-    + '<button class="btn btn-ghost" style="width:100%" onclick="billSkipToggle()">'+(skipped?"Clear skip — due again this month":"Skip this month")+'</button>');
-}
-function goalBillMarkPaid(){
-  var b = billsList().filter(function(x){return x.id===payId;})[0];
-  if(!b) return;
-  createGoalDeposit(b, view.y, view.m, payOcc);
-  setLeft(payId, 0, payOcc);
-  closeModal();
-  showBalanceWarning();
-}
-function goalBillUnpay(){
-  var b = billsList().filter(function(x){return x.id===payId;})[0];
-  if(!b) return;
-  var entry = goalDepositEntry(payId, view.y, view.m, payOcc);
-  if(entry && !goalUnpayArmed){
-    goalUnpayArmed = true;
-    var btn = document.getElementById("goalUnpayBtn");
-    if(btn){ btn.textContent = "Tap again — this deletes the "+usd(entry.amount)+" deposit"; btn.className = "btn btn-danger armed"; }
-    return;
-  }
-  if(entry) deleteGoalDeposit(payId, view.y, view.m, payOcc);
-  setLeft(payId, undefined, payOcc);
-  closeModal();
-}
-/* Shared by both the regular pay modal and the goal-linked pay modal, so there's exactly one
-   place that knows how to skip a bill — cleaning up any goal deposit if it's linked, and
-   always routing the actual "left" clear through setLeft so any auto-reduce-balance
-   adjustment gets reversed correctly rather than silently left in place. */
+/* Shared by every pay modal, so there's exactly one place that knows how to skip a bill —
+   cleaning up any goal deposit if it's linked, and always routing the actual "left"/varPaid
+   clear through the normal unpay path so any auto-reduce-balance adjustment gets reversed
+   correctly rather than silently left in place. */
 function billSkipToggle(){
   var b = billsList().filter(function(x){return x.id===payId;})[0];
   if(!b) return;
@@ -4288,7 +4453,8 @@ function billSkipToggle(){
       if(entry) deleteGoalDeposit(b.id, y, m, payOcc);
     }
     b.skipMonths.push(key);
-    setLeft(b.id, undefined, payOcc); // clears "left", reverses any auto-reduce-balance adjustment, persists/renders/reschedules
+    // Clear whatever paid state this bill uses, reversing any auto-reduce-balance adjustment.
+    if(b.type==="variable") unmarkVariablePaid(b.id, payOcc); else setLeft(b.id, undefined, payOcc);
     closeModal();
     showBalanceWarning();
   }
@@ -4319,12 +4485,36 @@ function expActiveBlockHtml(type, isActive, defaultPayVal, isDebtLinked, isGoalL
     + '<span id="expActive" class="toggle'+(isActive?" on":"")+'" data-on="'+(isActive?1:0)+'"><span class="knob"></span></span></button>'
     + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Paused expenses are kept but don\'t count anywhere.</p></div>';
 }
-function openExpenseForm(id, defaultType){
+function expTypeHelpText(type){
+  return type==="fixed" ? "A known amount, due on a schedule — rent, insurance, a subscription. Marking it paid always reduces Available now."
+    : type==="variable" ? "Due on a schedule, but the amount changes — set an estimate, then enter the real amount and confirm when it's actually due."
+    : "A monthly budget for spending that varies — groceries, gas. This is the only thing spending entries can pull from.";
+}
+// Segmented Fixed/Variable/Fund control, or — when linked to a savings goal — a locked
+// "Variable" notice instead, since a goal-linked transfer always needs an editable amount at
+// pay time (you might only manage half of what you budgeted some months) the same way any
+// other Variable expense does. Shared by the form's initial render and expCatChange's live
+// rebuild when someone switches into or out of a goal category.
+function expTypeBlockHtml(type, isGoalCat, hasExisting){
+  if(isGoalCat){
+    return '<div class="fgroup"><div class="field" style="display:flex;align-items:center;color:var(--sub)">Variable — linked to a savings goal</div>'
+      + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Goal-linked expenses are always Variable, so you can confirm less (or more) than budgeted right before it\'s marked paid. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-goal-linked-expense\')">More info</button></p></div>';
+  }
+  return '<div class="seg" style="width:100%">'
+    + '<button id="expSegFixed" style="flex:1" class="'+(type==="fixed"?"on":"")+'" onclick="expTypeChange(\'fixed\')">Fixed</button>'
+    + '<button id="expSegVariable" style="flex:1" class="'+(type==="variable"?"on":"")+'" onclick="expTypeChange(\'variable\')">Variable</button>'
+    + '<button id="expSegFund" style="flex:1" class="'+(type==="fund"?"on":"")+'" onclick="expTypeChange(\'fund\')">Fund</button>'
+    + '</div>'
+    + '<p id="expTypeHelp" class="muted" style="font-size:.72rem;margin-top:.35rem">'+expTypeHelpText(type)+' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-setup-expenses\')">More info</button></p>'
+    + (!hasExisting ? '<p class="muted" style="font-size:.72rem;margin-top:.5rem">Adding a loan or credit card instead? <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="closeModal();openDebtForm(null)">Add debt or credit</button></p>' : '');
+}
+function openExpenseForm(id, defaultType, presetGoalId){
   editId = id; confirmDel = false;
   var e = id ? S.expenses.filter(function(x){return x.id===id;})[0] : null;
-  var type = e ? e.type : (defaultType || "fixed");
   var freq = e ? e.freq : "monthly";
-  var cat = e ? (e.linkedGoalId ? "__goal__"+e.linkedGoalId : e.category) : (S.categories[0] || "__new");
+  var cat = e ? (e.linkedGoalId ? "__goal__"+e.linkedGoalId : e.category) : (presetGoalId ? "__goal__"+presetGoalId : (S.categories[0] || "__new"));
+  var isGoalCat = cat.indexOf("__goal__")===0;
+  var type = isGoalCat ? "variable" : (e ? e.type : (defaultType || "fixed"));
   var opts = S.categories.map(function(c){
     return '<option value="'+esc(c)+'"'+(c===cat?" selected":"")+'>'+esc(c)+'</option>';
   }).join("") + '<option value="__new">+ New category…</option>'
@@ -4342,26 +4532,15 @@ function openExpenseForm(id, defaultType){
   var isActive = e ? !!e.active : true;
   var hasDueDay = !!(e && (e.dueDay || e.dueDay2));
   var remindOn = e ? !e.remindOff : false;
-  var isGoalCat = cat.indexOf("__goal__")===0;
   var isDebtLinked = !!(e && e.linkedDebtId);
   var amountVal = e ? num(type==="fund" ? e.budget : (type==="variable" ? e.estimate : e.amount)) : "";
-  var typeHelpText = { fixed:"A known amount, due on a schedule — rent, insurance, a subscription. Marking it paid always reduces Available now.",
-    variable:"Due on a schedule, but the amount changes — set an estimate, then enter the real amount and confirm when it's actually due.",
-    fund:"A monthly budget for spending that varies — groceries, gas. This is the only thing spending entries can pull from." };
   var amountLbl = type==="fund" ? "Monthly budget" : (type==="variable" ? "Estimated amount" : "Amount");
 
   var debtName = isDebtLinked ? (S.debts.filter(function(d){return d.id===e.linkedDebtId;})[0]||{}).name : null;
   var typeBlock = isDebtLinked
     ? '<div class="fgroup"><div class="field" style="display:flex;align-items:center;color:var(--sub)">Fixed — linked to a debt</div>'
       + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Tracks <b style="color:var(--ink)">'+esc(debtName||"a debt")+'</b>\'s monthly payment — managed from Settings, not here. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-debt-credit\')">More info</button></p></div>'
-    : '<div class="fgroup"><div class="seg" style="width:100%">'
-      + '<button id="expSegFixed" style="flex:1" class="'+(type==="fixed"?"on":"")+'" onclick="expTypeChange(\'fixed\')">Fixed</button>'
-      + '<button id="expSegVariable" style="flex:1" class="'+(type==="variable"?"on":"")+'" onclick="expTypeChange(\'variable\')">Variable</button>'
-      + '<button id="expSegFund" style="flex:1" class="'+(type==="fund"?"on":"")+'" onclick="expTypeChange(\'fund\')">Fund</button>'
-      + '</div>'
-      + '<p id="expTypeHelp" class="muted" style="font-size:.72rem;margin-top:.35rem">'+typeHelpText[type]+' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-setup-expenses\')">More info</button></p>'
-      + (!e ? '<p class="muted" style="font-size:.72rem;margin-top:.5rem">Adding a loan or credit card instead? <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="closeModal();openDebtForm(null)">Add debt or credit</button></p>' : '')
-      + '</div>';
+    : '<div class="fgroup" id="expTypeBlockWrap">' + expTypeBlockHtml(type, isGoalCat, !!e) + '</div>';
 
   var defaultPayVal = e ? (e.defaultPayMethod || "available") : "available";
   var activeBlock = '<div id="expActiveBlockWrap" style="margin-top:.9rem">'+expActiveBlockHtml(type, isActive, defaultPayVal, isDebtLinked, isGoalCat)+'</div>';
@@ -4402,7 +4581,7 @@ function openExpenseForm(id, defaultType){
         ? '<div class="field" style="display:flex;align-items:center;color:var(--sub)">'+esc(cat)+'</div>'
         : '<select id="expCat" class="field" onchange="expCatChange(this.value)">'+opts+'</select>'
           + '<div id="expNewCatWrap" class="' + (cat === "__new" ? "" : "hidden") + '"><input id="expNewCat" class="field" style="margin-top:.5rem" placeholder="Category name"></div>'
-          + '<p id="expGoalNote" class="muted'+(isGoalCat?"":" hidden")+'" style="font-size:.72rem;margin-top:.5rem">Paid in full logs a matching deposit; no partial payments. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-goal-linked-expense\')">More info</button></p>')
+          + '<p id="expGoalNote" class="muted'+(isGoalCat?"":" hidden")+'" style="font-size:.72rem;margin-top:.5rem">Checking it off logs a matching deposit; the amount can be adjusted before or after. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-goal-linked-expense\')">More info</button></p>')
     + '</div>'
     + '</div>'
 
@@ -4432,12 +4611,7 @@ function expTypeChange(val){
   var lbl = document.getElementById("expAmountLbl");
   if(lbl) lbl.textContent = val==="fund" ? "Monthly budget" : (val==="variable" ? "Estimated amount" : "Amount");
   var help = document.getElementById("expTypeHelp");
-  if(help){
-    var txt = val==="fixed" ? "A known amount, due on a schedule — rent, insurance, a subscription. Marking it paid always reduces Available now."
-      : val==="variable" ? "Due on a schedule, but the amount changes — set an estimate, then enter the real amount and confirm when it's actually due."
-      : "A monthly budget for spending that varies — groceries, gas. This is the only thing spending entries can pull from.";
-    help.innerHTML = txt + ' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-setup-expenses\')">More info</button>';
-  }
+  if(help) help.innerHTML = expTypeHelpText(val) + ' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-setup-expenses\')">More info</button>';
   var activeWrap = document.getElementById("expActiveBlockWrap");
   if(activeWrap){
     var activeToggle = document.getElementById("expActive");
@@ -4452,15 +4626,27 @@ function expTypeChange(val){
 function expCatChange(val){
   document.getElementById("expNewCatWrap").className = val==="__new" ? "" : "hidden";
   var note = document.getElementById("expGoalNote");
-  if(note) note.className = "muted" + (val.indexOf("__goal__")===0 ? "" : " hidden");
+  var isGoal = val.indexOf("__goal__")===0;
+  if(note) note.className = "muted" + (isGoal ? "" : " hidden");
+  var typeEl = document.getElementById("expType");
+  if(typeEl && isGoal) typeEl.value = "variable";
+  var typeWrap = document.getElementById("expTypeBlockWrap");
+  if(typeWrap) typeWrap.innerHTML = expTypeBlockHtml(typeEl ? typeEl.value : "fixed", isGoal, !!editId);
+  var lbl = document.getElementById("expAmountLbl");
+  if(lbl && typeEl) lbl.textContent = typeEl.value==="fund" ? "Monthly budget" : (typeEl.value==="variable" ? "Estimated amount" : "Amount");
+  var billWrap = document.getElementById("expBillWrap");
+  var fundWrap = document.getElementById("expFundWrap");
+  if(typeEl){
+    if(billWrap) billWrap.className = typeEl.value==="fund" ? "hidden" : "";
+    if(fundWrap) fundWrap.className = typeEl.value==="fund" ? "" : "hidden";
+  }
   var activeWrap = document.getElementById("expActiveBlockWrap");
   if(activeWrap){
-    var typeEl = document.getElementById("expType");
     var activeToggle = document.getElementById("expActive");
     var curActive = activeToggle ? activeToggle.getAttribute("data-on")==="1" : true;
     var dpSel = document.getElementById("expDefaultPayMethod");
     var curDefaultPay = dpSel ? dpSel.value : "available";
-    activeWrap.innerHTML = expActiveBlockHtml(typeEl ? typeEl.value : "fixed", curActive, curDefaultPay, false, val.indexOf("__goal__")===0);
+    activeWrap.innerHTML = expActiveBlockHtml(typeEl ? typeEl.value : "fixed", curActive, curDefaultPay, false, isGoal);
   }
 }
 function expFreqChange(val){
@@ -4537,6 +4723,7 @@ function expSave(){
   var freq = document.getElementById("expFreq").value;
   var catSel = document.getElementById("expCat").value;
   var linkedGoalId = catSel.indexOf("__goal__")===0 ? catSel.slice(8) : undefined;
+  if(linkedGoalId) type = "variable";
   var goal = linkedGoalId ? S.savingsGoals.filter(function(g){ return g.id===linkedGoalId; })[0] : null;
   var cat = linkedGoalId ? ("→ "+(goal?goal.name:"Deleted goal")) : (catSel==="__new" ? document.getElementById("expNewCat").value.trim() : catSel);
   var month = parseInt(document.getElementById("expMonth").value,10) || 1;
