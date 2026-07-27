@@ -1482,7 +1482,7 @@ function monthBillRow(b, data, occ, subtitle){
         ? (subtitle||'')
         : '<span class="cat-dot" style="background:'+catColor(b.category)+'"></span>'+esc(b.category)+(subtitle?' · '+subtitle:''))+'</div></div>'
     + '<div style="display:flex;align-items:center;gap:.5rem">'
-    + '<div class="bill-amt"><div class="due tnum">'+(!paid?"≈ ":"")+usd(full)+'</div>'
+    + '<div class="bill-amt"><div class="due tnum">'+usd(full)+'</div>'
     + '<div class="status tnum" style="color:'+statusColor+'">'+statusText+'</div></div>'
     + '<i class="row-chev" aria-hidden="true" style="color:var(--sub);display:flex;flex:none">'+icon("right",15)+'</i>'
     + '</div>'
