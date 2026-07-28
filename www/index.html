@@ -344,10 +344,9 @@ function dueInMonth(b,m){
   if(b.freq==="yearly") return (b.month||1)===m;
   return true;
 }
-/* A Variable expense is either unpaid (showing its estimate) or paid (showing whatever amount
-   was entered when it was marked paid) — there's no ongoing "amount owed" balance to track,
-   since these are paid in one shot once the real bill is known, not chipped away at over the
-   month. Fixed just uses its fixed amount, unaffected by any of this. */
+/* An expense is either unpaid (showing its estimate) or paid (showing whatever amount was
+   entered when it was marked paid) — there's no ongoing "amount owed" balance to track, since
+   these are paid in one shot once the real bill is known, not chipped away at over the month. */
 function baseAmount(e){ return num(e.estimate); }
 function varPaidAmount(data, billId, occ){
   var d = data || md();
@@ -3914,6 +3913,23 @@ function settingsDetailScreen(key){
    are just display labels; nothing else in the app reads them. */
 var UPDATE_LOG = [
   {
+    version: "1.2",
+    date: "July 2026",
+    notes: [
+      "Fixed and Variable are now just one type, \"Bill\" — Variable could already do everything Fixed could (instant-check, editable amount, Skip) plus handle a bill coming in over or under expectations, which Fixed never could. Existing Fixed bills convert over automatically; partial payment (Fixed's old \"amount left\" tracking) has no equivalent in the merged model — a bill is due or paid at whatever amount was confirmed, never partway paid in between.",
+      "Linking an expense to a savings goal is now its own field, independent of Category — previously picking a goal secretly replaced the category with a synthetic \"→ Goal Name\" string. Category is fully yours to manage now; picking a goal still locks the expense's type to Bill, since a Fund can't feed one.",
+      "Debts and credit cards now show up as bills in their own \"Credit & debt\" section at the top of the Month tab, with a payoff method: \"Balance in full\" (the bill defaults to the live balance; checking it off zeroes it out) or \"Set amount\" (a fixed monthly payment, same as a regular bill — required for loans, optional for credit). A \"Balance in full\" card that's already marked paid reopens automatically if a new charge comes in. Credit is now the default type (and first in the list) when adding a new one, since it's added more often than loans.",
+      "\"Don't adjust a balance\" is now an option everywhere money gets paid from — bills, debts — not just spending entries, for anything already accounted for elsewhere (an autopay from an untracked account, a payroll deduction, cash payment). Marking something paid this way still updates its own paid status normally; it just skips touching Available now or any card balance.",
+      "Funds can now be flagged \"Cash fund\" for money already set aside separately — physical cash, a separate account. A cash fund tracks a running balance instead of a monthly budget: it doesn't reset each month and doesn't reduce Available now, since that money was never part of it to begin with. Its balance can be corrected anytime via a dedicated \"Adjust balance\" action, which logs the correction as its own entry instead of silently overwriting the number.",
+      "\"My money\" on the Month tab now shows just Available now and Net remaining up front, with the supporting numbers (still due, funds left, rest of year) tucked behind a \"Show the math\" toggle — Available now stays directly editable either way.",
+      "Bills and Log each get a floating add button instead of a button pinned to the top of the list, so it's reachable without scrolling back up — Settings' combined Income/goals/debts screen keeps its inline buttons instead, since that page has two separate lists to add to.",
+      "The Android back button now returns to the Month tab from any other tab before it'll exit the app, instead of exiting from wherever you happen to be.",
+      "Trimmed down what a Month-tab row shows at a glance: dropped the \"est.\" tag (it had started showing on every bill, not just ones that actually vary) and the \"→ goal\" text tag in favor of a small icon, with a chevron added consistently across every row so it's clearer the whole row is tappable, not just the checkbox.",
+      "Fixed a real bug: restoring a backup only ran a handful of the app's data migrations, not all of them — anything saved in an older format (a Fixed-type bill, older paid-status tracking) could come back missing entirely or showing the wrong paid status. Restoring now runs the exact same setup a normal app load does.",
+      "Fixed a bug where deleting a goal's auto-logged deposit from the Savings tab didn't actually mark its linked bill unpaid again, a leftover from before goal-linked bills used the same paid-tracking as every other bill."
+    ]
+  },
+  {
     version: "1.1",
     date: "July 2026",
     notes: [
@@ -4121,7 +4137,7 @@ function openDebtForm(id){
   var d = id ? S.debts.filter(function(x){return x.id===id;})[0] : null;
   if(!d && id){ id = null; debtEditId = null; }
   var active = d ? d.active!==false : true;
-  var usable = d ? !!d.usableAsPayment : false;
+  var usable = d ? !!d.usableAsPayment : true;
   var payoffMethod = d ? (d.payoffMethod || (usable ? "full" : "fixed")) : "full";
   var monthlyPayment = d && d.monthlyPayment ? num(d.monthlyPayment) : "";
   modal(d ? "Edit debt / credit" : "Add debt or credit",
@@ -4130,8 +4146,8 @@ function openDebtForm(id){
     + '<div class="fgroup" style="margin-top:.9rem"><label class="flabel">Type</label>'
     + '<input type="hidden" id="dtUsable" value="'+(usable?"1":"0")+'">'
     + '<div class="seg" style="width:100%">'
-    + '<button id="dtSegLoan" style="flex:1" class="'+(!usable?"on":"")+'" onclick="dtTypeChange(false)">Loan</button>'
     + '<button id="dtSegCredit" style="flex:1" class="'+(usable?"on":"")+'" onclick="dtTypeChange(true)">Credit</button>'
+    + '<button id="dtSegLoan" style="flex:1" class="'+(!usable?"on":"")+'" onclick="dtTypeChange(false)">Loan</button>'
     + '</div>'
     + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Credit is revolving — a card or line of credit that bills or spending can be charged to, and that stays visible at $0 once it\'s carried a balance. A loan is fixed-purpose — a car loan, a mortgage — can\'t be charged to, and drops off once it\'s paid off. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-debt-credit\')">More info</button></p></div>'
     + '<div class="fgroup" style="margin-top:.9rem" id="dtPayoffWrap">'+dtPayoffBlockHtml(usable, payoffMethod, monthlyPayment)+'</div>'
@@ -4164,7 +4180,8 @@ function dtPayoffBlockHtml(usable, payoffMethod, monthlyPayment){
     + '</div>'
     + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">'+(payoffMethod==="full"
         ? "Each month's bill defaults to whatever the current balance is — checking it off pays it off completely. New charges after that reopen it, showing whatever's newly owed."
-        : "Each month's bill is the fixed amount below, no matter what the balance is. New charges just add to the balance without changing it.")+'</p>'
+        : "Each month's bill is the fixed amount below, no matter what the balance is. New charges just add to the balance without changing it.")
+        +' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-debt-credit\')">More info</button></p>'
     + (payoffMethod==="fixed" ? mpField : '');
 }
 function dtTypeChange(usable){
@@ -4242,7 +4259,7 @@ var HELP_ITEMS = [
   { id:"help-savings-goal", title:"Save toward a goal",
     body:"Go to Settings → Setup (or add one the first time you open Billfold) to name a goal and set a target — you can keep up to 5 at a time. Log deposits and withdrawals against a goal from Log → Savings; each goal's card shows what's saved, what's left, and how close you are. A withdrawal can't take a goal below $0 — Billfold will cap it and tell you the most you can actually withdraw. Tap a goal any time to edit its target or delete it — deleting keeps its logged deposits on record, grouped under “Other.”" },
   { id:"help-goal-linked-expense", title:"Expenses that feed a savings goal",
-    body:"If you already treat a recurring transfer — a travel fund, an emergency fund — like a bill, link it to a goal instead of a regular category when adding or editing an expense: pick the goal from the “Savings goals” group in the Category list. Goal-linked expenses are always Variable, so some months you can contribute less (or more) than budgeted — tap the expense itself to adjust the amount before confirming, the same as any other Variable expense. Tapping the circle marks it paid at the estimate and logs a matching deposit; editing the amount afterward updates that deposit to match. Unpaying it opens the pay screen to confirm first, since it deletes the deposit — checking it back off, on the other hand, is instant. Didn't make the transfer this month? Tap “Skip this month” instead — nothing gets logged." },
+    body:"If you already treat a recurring transfer — a travel fund, an emergency fund — like a bill, link it to a goal when adding or editing an expense: pick the goal from the “Link to a savings goal” field, right below Category. It's independent of Category, so the expense still gets a real, reportable category of its own — “Savings,” “Travel,” whatever fits — while the goal link is a separate on/off choice. Picking a goal locks the expense's type to Bill, since a Fund can't feed a goal. Checking it off marks it paid at the default amount and logs a matching deposit; tap the expense first to adjust the amount before confirming if you're contributing less (or more) than usual — editing the amount afterward updates that deposit to match. Unpaying it opens the pay screen to confirm first, since it deletes the deposit — checking it back off, on the other hand, is instant. Didn't make the transfer this month? Tap “Skip this month” instead — nothing gets logged." },
   { id:"help-debt-credit", title:"Track debt & credit",
     body:"Go to Settings → Setup to add a loan or card: a name, a Type (Credit or Loan), and a current balance — no interest rate, no amortization, just a running total you correct by hand against your statement. Credit is revolving — a card or line of credit — and gets a choice of payoff method: “Balance in full” (the Month tab bill defaults to whatever the live balance is; checking it off zeroes it out) or “Set amount” (a fixed monthly payment you choose, same as a regular bill). A Loan can't be charged to and is always a set monthly payment, since there's no live balance to pay in full against. Either way, it shows up on the Month tab in its own “Credit & debt” section at the top — check it off to pay the default amount, or tap it to enter something different, including an extra or partial payment; editing the debt itself (name, type, payoff method, balance) is one tap away from there too. A “Balance in full” card that's already marked paid this month automatically reopens if a new charge comes in, showing whatever's newly owed — a “Set amount” debt or loan isn't affected by new charges at all, since its bill is a fixed target regardless of balance. Picking Credit as the Type is what makes it chargeable from bills or spending; a loan never gets that option. See total remaining and each debt's balance under Tools → Reports → Debts." },
   { id:"help-backup", title:"Back up and move your data",
@@ -4267,11 +4284,13 @@ function setHelpSearch(input){
 function clearHelpSearch(){ helpSearchQuery = ""; render(); }
 var GLOSSARY_ITEMS = [
   { term:"Bill", def:"Due on a schedule — rent, a subscription, insurance, a utility bill. Checking it off marks it paid using the default amount; tap it first to enter the real amount before confirming if it differs. No partial payments; it's either unpaid (showing the default) or paid (showing what you confirmed), and you can correct that amount anytime while it's marked paid.", linkLabel:"Add a bill", onclick:"billsSubMode='bills';go('bills');openExpenseForm(null,'variable')" },
-  { term:"Fund", def:"A monthly budget for a category of spending that varies, like groceries or gas — the only thing spending entries can pull from.", linkLabel:"Set up a fund", onclick:"billsSubMode='funds';go('bills');openExpenseForm(null,'fund')" },
+  { term:"Fund", def:"A monthly budget for a category of spending that varies, like groceries or gas — the only thing spending entries can pull from. A Cash fund (see below) works differently.", linkLabel:"Set up a fund", onclick:"billsSubMode='funds';go('bills');openExpenseForm(null,'fund')" },
   { term:"Spending entry", def:"A single day-to-day expense logged in your ledger, always tied to a Fund — check “Unplanned” if it goes beyond that fund's budget.", linkLabel:"Log a spending entry", onclick:"trackMode='journal';go('track');openJournalForm(null)" },
   { term:"Savings entry", def:"A deposit or withdrawal logged against one of your savings goals.", linkLabel:"Log a savings entry", onclick:"trackMode='savings';go('track');openSavingsEntryForm(null)" },
   { term:"Goal", def:"A named savings target with a dollar amount — up to 5 at a time — that your savings entries count toward.", linkLabel:"Add a goal", onclick:"openSettingsSection('goals');openGoalForm(null)" },
-  { term:"Debt / credit", def:"A card or loan balance you pay down (in full or in part) whenever you like — it carries over month to month until it's cleared, with no interest math. Flag it “usable as a payment option” if it's revolving credit you'd pay other things with; leave that off for a fixed-purpose loan.", linkLabel:"Add debt or credit", onclick:"openSettingsSection('goals');openDebtForm(null)" },
+  { term:"Debt / credit", def:"A card or loan you're tracking the payoff of. Credit is revolving — chargeable from bills or spending — with a choice between paying the balance in full each month or a set amount. A Loan can't be charged to and is always a set monthly payment. Either way it shows up on the Month tab like a bill, with no interest math — just a running balance you correct by hand against your statement.", linkLabel:"Add debt or credit", onclick:"openSettingsSection('goals');openDebtForm(null)" },
+  { term:"Cash fund", def:"A Fund for money already set aside separately — physical cash, a separate account. Unlike a regular Fund, it tracks a running balance instead of a monthly budget: it doesn't reset each month, and it doesn't reduce Available now, since that money was never part of it to begin with.", linkLabel:"Add a cash fund", onclick:"billsSubMode='funds';go('bills');openExpenseForm(null,'fund')" },
+  { term:"Balance adjustment", def:"A logged correction to a cash fund's balance — say, after counting your wallet and finding it doesn't match. Recorded as its own entry so there's a record of why the balance moved, rather than the number just quietly changing.", linkLabel:"About cash funds", onclick:"openHelpItem('help-funds')" },
   { term:"Hidden tab", def:"A tab removed from the bottom tab bar for daily use, but still fully there — open it anytime by tapping its name in Settings → Tabs & appearance.", linkLabel:"Manage tabs", onclick:"openSettingsSection('tabs')" }
 ];
 function helpDetailCard(){
