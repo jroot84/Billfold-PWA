@@ -891,6 +891,53 @@ function migrateJournalEntries(){
 }
 function billsList(){ return S.expenses.filter(function(e){ return e.type==="variable"; }); }
 function fundsList(){ return S.expenses.filter(function(e){ return e.type==="fund"; }); }
+// A cash fund tracks real money already set aside — physical cash, a separate account — so it
+// never resets monthly and never reduces Available now. Its remaining balance is the starting
+// amount, minus everything ever spent against it, plus any manual corrections ("adjustments"),
+// all computed from the same journal entries a regular fund already uses — nothing about saving
+// or editing a spending entry needs to change for this to work.
+function fundAllTimeSpent(fund){
+  return S.journal.reduce(function(sum, e){
+    if(e.fundId !== fund.id || e.adjustment) return sum;
+    return sum + num(e.amount);
+  }, 0);
+}
+function fundAllTimeAdjustments(fund){
+  return S.journal.reduce(function(sum, e){
+    if(e.fundId !== fund.id || !e.adjustment) return sum;
+    return sum + num(e.adjustmentDelta);
+  }, 0);
+}
+function cashFundRemaining(fund){
+  return num(num(fund.startingBalance) - fundAllTimeSpent(fund) + fundAllTimeAdjustments(fund));
+}
+var fundAdjustId = null;
+function openFundBalanceAdjust(fundId){
+  var f = S.expenses.filter(function(x){ return x.id===fundId; })[0];
+  if(!f) return;
+  fundAdjustId = fundId;
+  var current = cashFundRemaining(f);
+  modal("Adjust "+esc(f.name)+"'s balance",
+    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">Current balance: '+usd(current)+'. Enter what it should actually be — the difference gets logged as a balance adjustment, not counted as spending.</p>'
+    + '<label class="flabel">New balance</label>'
+    + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
+    + '<input id="fundAdjustInput" class="tnum" inputmode="decimal" value="'+current+'" style="padding:.6rem 0 .6rem .25rem" onkeydown="if(event.key===\'Enter\')fundBalanceAdjustSave()">'+calcBtn()+'</div>'
+    + '<button class="btn btn-pine" style="width:100%;margin-top:1rem" onclick="fundBalanceAdjustSave()">Save</button>');
+  var inp = document.getElementById("fundAdjustInput");
+  if(inp){ inp.focus(); inp.select(); }
+}
+function fundBalanceAdjustSave(){
+  var inp = document.getElementById("fundAdjustInput");
+  if(!fundAdjustId || !inp) return;
+  var f = S.expenses.filter(function(x){ return x.id===fundAdjustId; })[0];
+  if(!f){ closeModal(); return; }
+  var delta = num(num(inp.value) - cashFundRemaining(f));
+  if(delta!==0){
+    S.journal.push({ id:"j"+Date.now(), date:new Date().toISOString().slice(0,10), note:"Balance adjustment",
+      amount:0, fundId:f.id, adjustment:true, adjustmentDelta:delta });
+  }
+  persist(); closeModal(); render();
+}
 
 /* ---------- Debts / Credit ----------
    A debt/credit balance is always live — no monthly reset, no interest calc, no separate
@@ -1372,7 +1419,7 @@ function monthScreen(){
   });
   var countableTotal = countable.length + debtItems.length;
   var cardsTotal = num(data.oneTime);
-  var activeFunds = fundsList().filter(function(f){ return f.active; });
+  var activeFunds = fundsList().filter(function(f){ return f.active && !f.cashFund; });
   var fundsLeft = activeFunds.reduce(function(s,f){
     return s + Math.max(0, fundBudgetFor(f, view.y, view.m) - fundSpentInMonth(f, view.y, view.m));
   }, 0);
@@ -1403,13 +1450,13 @@ function monthScreen(){
     + '<div class="row" style="margin-top:.6rem"><span class="lbl">Net remaining after bills &amp; funds</span>'
     + '<span class="tnum" style="font-weight:700;color:'+(afterAll<0?"var(--red)":"var(--pine)")+'">'+usd(afterAll)+'</span></div>'
     + '<button style="all:unset;cursor:pointer;display:flex;align-items:center;gap:.3rem;margin-top:.7rem;color:var(--sub);font-size:.75rem;font-weight:600" onclick="moneyMathOpen=!moneyMathOpen;render()">'
-    + 'Show the math <span style="display:flex;transform:'+(moneyMathOpen?"rotate(180deg)":"none")+'">'+icon("down",13)+'</span></button>'
+    + (moneyMathOpen ? "Hide the math" : "Show the math") + ' <span style="display:flex;transform:rotate('+(moneyMathOpen?"-90":"90")+'deg)">'+icon("right",13)+'</span></button>'
     + (moneyMathOpen ? (
       '<div style="margin-top:.6rem">'+oneTimeExpenseRow(S.oneTimeName, data.oneTime)+'</div>'
       + '<div class="divider"></div>'
       + '<div class="row"><span class="lbl">Still due this month</span>'
       + '<span class="tnum" style="font-weight:700;color:'+(stillDue>0?"var(--amber)":"var(--pine)")+'">'+usd(stillDue)+'</span></div>'
-      + (activeFunds.length ? '<div class="row" style="margin-top:.4rem"><span class="lbl">Funds not yet spent</span>'
+      + (activeFunds.length ? '<div class="row" style="margin-top:.4rem"><button style="all:unset;cursor:pointer;font-size:.9rem;color:var(--pine);font-weight:600;text-decoration:underline" onclick="billsSubMode=\'funds\';go(\'bills\')">Funds not yet spent</button>'
           + '<span class="tnum" style="font-weight:700;color:'+(fundsLeft>0?"var(--amber)":"var(--pine)")+'">'+usd(fundsLeft)+'</span></div>' : '')
       + '<div class="divider" style="margin:.6rem 0"></div>'
       + '<div class="row"><span class="muted" style="font-size:.75rem">Rest of '+view.y+' — left to fund</span>'
@@ -1718,7 +1765,7 @@ function billsSection(){
 function fundBudgetFor(fund, y, m){ return num(fund.budget); }
 function fundSpentInMonth(fund, y, m){
   return S.journal.reduce(function(sum, e){
-    if(e.fundId !== fund.id) return sum;
+    if(e.fundId !== fund.id || e.adjustment) return sum;
     var d = new Date(e.date+"T00:00:00");
     if(isNaN(d)) return sum;
     if(d.getFullYear()!==y || (d.getMonth()+1)!==m) return sum;
@@ -1819,12 +1866,15 @@ function fundsSortEntries(list){
 }
 function fundsSection(){
   var active = fundsList().filter(function(f){ return f.active; });
-  var budgetTotal = active.reduce(function(s,f){ return s+num(f.budget); },0);
-  var spentTotal = active.reduce(function(s,f){ return s+fundSpentInMonth(f, view.y, view.m); },0);
-  var leftTotal = active.reduce(function(s,f){ return s+Math.max(0, num(f.budget)-fundSpentInMonth(f, view.y, view.m)); },0);
+  var budgetFunds = active.filter(function(f){ return !f.cashFund; });
+  var cashFunds = active.filter(function(f){ return f.cashFund; });
+  var budgetTotal = budgetFunds.reduce(function(s,f){ return s+num(f.budget); },0);
+  var spentTotal = budgetFunds.reduce(function(s,f){ return s+fundSpentInMonth(f, view.y, view.m); },0);
+  var leftTotal = budgetFunds.reduce(function(s,f){ return s+Math.max(0, num(f.budget)-fundSpentInMonth(f, view.y, view.m)); },0);
+  var cashTotal = cashFunds.reduce(function(s,f){ return s+cashFundRemaining(f); },0);
 
   var h = '<section class="card pad"><h2 class="eyebrow">Funds — '+MS[view.m-1]+' '+view.y+'</h2>'
-    + '<p class="muted" style="font-size:.85rem;margin-bottom:.75rem">Budgeted amounts for spending that varies month to month — groceries, gas, and the like. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p>';
+    + '<p class="muted" style="font-size:.85rem;margin-bottom:.75rem">Budgeted amounts for spending that varies month to month — groceries, gas, and the like. Cash funds track money already set aside separately and don\'t affect Available now. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p>';
   if(fundsList().length===0){
     h += '<p class="muted" style="font-size:.9rem">No funds yet. Tap the add button below to set your first budget.</p>'
       + '</section>';
@@ -1835,6 +1885,8 @@ function fundsSection(){
     + '<div class="divider"></div>'
     + '<div class="row"><span class="lbl">Left across all funds</span>'
     + '<span class="tnum" style="font-weight:800;color:'+(leftTotal>=0?"var(--pine)":"var(--red)")+'">'+usd(leftTotal)+'</span></div>'
+    + (cashFunds.length ? ('<div class="divider"></div><div class="row"><span class="muted" style="font-size:.85rem">Cash on hand</span>'
+      + '<span class="tnum" style="font-weight:700">'+usd(cashTotal)+'</span></div>') : '')
     + '</section>';
 
   var chips = [];
@@ -1870,22 +1922,36 @@ function fundsSection(){
 
   h += '<section class="card">';
   visible.forEach(function(f, i){
-    var spent = fundSpentInMonth(f, view.y, view.m);
-    var budget = num(f.budget);
-    var left = Math.max(0, budget - spent);
-    var pct = budget>0 ? Math.max(0, Math.min(100, spent/budget*100)) : 0;
-    var over = spent > budget;
+    var rowInner;
+    if(f.cashFund){
+      var remaining = cashFundRemaining(f);
+      rowInner = '<div class="row" style="margin-bottom:.1rem">'
+        + '<span style="display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:.9rem'+(f.active?'':';color:var(--sub)')+'">'
+        + '<span class="cat-dot" style="background:'+catColor(f.category)+'"></span>'+esc(f.name)
+        + (f.active?'':' <span style="font-size:.7rem;font-weight:500;padding:.1rem .35rem;border-radius:.25rem;background:var(--line);color:var(--sub)">Paused</span>')
+        + '</span>'
+        + '<span class="tnum" style="font-weight:700;font-size:.9rem;color:'+(remaining<0?"var(--red)":"var(--pine)")+'">'+usd(remaining)+'</span>'
+        + '</div>'
+        + '<div class="bill-cat">'+esc(f.category)+' · Cash fund</div>';
+    } else {
+      var spent = fundSpentInMonth(f, view.y, view.m);
+      var budget = num(f.budget);
+      var left = Math.max(0, budget - spent);
+      var pct = budget>0 ? Math.max(0, Math.min(100, spent/budget*100)) : 0;
+      var over = spent > budget;
+      rowInner = '<div class="row" style="margin-bottom:.1rem">'
+        + '<span style="display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:.9rem'+(f.active?'':';color:var(--sub)')+'">'
+        + '<span class="cat-dot" style="background:'+catColor(f.category)+'"></span>'+esc(f.name)
+        + (f.active?'':' <span style="font-size:.7rem;font-weight:500;padding:.1rem .35rem;border-radius:.25rem;background:var(--line);color:var(--sub)">Paused</span>')
+        + '</span>'
+        + '<span class="tnum" style="font-weight:700;font-size:.9rem;color:'+(over?"var(--red)":"var(--pine)")+'">'+usd(left)+' left</span>'
+        + '</div>'
+        + '<div class="bill-cat" style="margin-bottom:.4rem">'+esc(f.category)+' · '+usd(spent)+' of '+usd(budget)+' spent</div>'
+        + '<div class="cat-bar"><div class="fill" style="width:'+pct+'%;background:'+(over?"var(--red)":"var(--pine)")+'"></div></div>';
+    }
     h += (i>0 ? '<div class="divider"></div>' : '')
       + '<button style="width:100%;text-align:left;display:block;padding:.85rem 1rem'+(i===0?' 0':'')+'" onclick="openExpenseForm(\''+f.id+'\')">'
-      + '<div class="row" style="margin-bottom:.1rem">'
-      + '<span style="display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:.9rem'+(f.active?'':';color:var(--sub)')+'">'
-      + '<span class="cat-dot" style="background:'+catColor(f.category)+'"></span>'+esc(f.name)
-      + (f.active?'':' <span style="font-size:.7rem;font-weight:500;padding:.1rem .35rem;border-radius:.25rem;background:var(--line);color:var(--sub)">Paused</span>')
-      + '</span>'
-      + '<span class="tnum" style="font-weight:700;font-size:.9rem;color:'+(over?"var(--red)":"var(--pine)")+'">'+usd(left)+' left</span>'
-      + '</div>'
-      + '<div class="bill-cat" style="margin-bottom:.4rem">'+esc(f.category)+' · '+usd(spent)+' of '+usd(budget)+' spent</div>'
-      + '<div class="cat-bar"><div class="fill" style="width:'+pct+'%;background:'+(over?"var(--red)":"var(--pine)")+'"></div></div>'
+      + rowInner
       + '</button>';
   });
   h += '</section>';
@@ -2862,7 +2928,7 @@ function setJournalFilterCategory(c){ journalFilterCategory = c; render(); openJ
 function clearJournalFilterScope(){ journalFilterScope = "all"; render(); }
 function clearJournalFilterCategory(){ journalFilterCategory = null; render(); }
 function journalVisibleEntries(){
-  var list = S.journal.slice();
+  var list = S.journal.slice().filter(function(e){ return !e.adjustment; });
   if(journalFilterScope==="month"){
     list = list.filter(function(e){ var d=new Date(e.date+"T00:00:00"); return !isNaN(d) && d.getFullYear()===view.y && (d.getMonth()+1)===view.m; });
   } else if(journalFilterScope==="year"){
@@ -3062,11 +3128,16 @@ function jfRefreshBalanceLabel(){ jfMethodChanged(); }
 function jfFundBalance(fundId, date){
   var fund = fundsList().filter(function(f){ return f.id===fundId; })[0];
   if(!fund) return "";
+  var prev = jEditId ? S.journal.filter(function(x){ return x.id===jEditId; })[0] : null;
+  if(fund.cashFund){
+    var remainingNow = cashFundRemaining(fund);
+    if(prev && prev.fundId===fund.id && !prev.adjustment) remainingNow += num(prev.amount);
+    return usd(remainingNow) + " balance" + (remainingNow<0 ? " (already negative)" : "");
+  }
   var fd = new Date(date+"T00:00:00");
   if(isNaN(fd)) return "";
   var fy = fd.getFullYear(), fm = fd.getMonth()+1;
   var spentSoFar = fundSpentInMonth(fund, fy, fm);
-  var prev = jEditId ? S.journal.filter(function(x){ return x.id===jEditId; })[0] : null;
   if(prev && prev.fundId===fund.id && !prev.unplanned){
     var prevD = new Date(prev.date+"T00:00:00");
     if(!isNaN(prevD) && prevD.getFullYear()===fy && (prevD.getMonth()+1)===fm) spentSoFar -= num(prev.amount);
@@ -3108,7 +3179,13 @@ function jfSave(){
   var fund = fundsList().filter(function(f){ return f.id===fundId; })[0];
   if(!fund) return fail("Pick a fund — every spending entry ties to one.");
 
-  if(!unplanned){
+  if(!unplanned && fund.cashFund){
+    var cashRemaining = cashFundRemaining(fund);
+    if(prev && prev.fundId===fund.id && !prev.adjustment) cashRemaining += num(prev.amount);
+    if(amount - cashRemaining > 0.005){
+      return fail("That's "+usd(amount-cashRemaining)+" more than "+esc(fund.name)+" has left ("+usd(Math.max(0,cashRemaining))+" remaining). Check \u201cUnplanned\u201d to log it without pushing the balance below $0.");
+    }
+  } else if(!unplanned){
     var fd = new Date(date+"T00:00:00");
     var fy = fd.getFullYear(), fm = fd.getMonth()+1;
     var spentSoFar = fundSpentInMonth(fund, fy, fm);
@@ -4157,7 +4234,7 @@ var HELP_ITEMS = [
   { id:"help-setup-expenses", title:"Set up your expenses",
     body:"Head to the Bills tab and tap the add button. Pick a type: Bill for anything due on a schedule — rent, insurance, a subscription, a utility bill that changes month to month. Set a default amount now; checking it off pays that amount, or tap it first to enter the real amount before confirming if a bill comes in different. Fund for a monthly budget on spending that varies (groceries, gas) — this is the only type spending entries can pull from. Bills get a category (which powers your reports) and an optional due day that unlocks a per-expense reminder toggle." },
   { id:"help-funds", title:"Budget for spending that varies",
-    body:"Add a Fund from the Bills tab and set a monthly budget. When you log spending in Log → Spending, pick that fund, and Billfold does the subtraction for you so you can see what's left — a toggle also offers to subtract it from that month's Available now, worth leaving on so Available now reflects money you've actually spent. A fund can't go below $0: if an entry would push it past its budget, check “Unplanned” to log it anyway — it still counts in reports under that fund's category, it just won't drag the fund's remaining negative." },
+    body:"Add a Fund from the Bills tab and set a monthly budget. When you log spending in Log → Spending, pick that fund, and Billfold does the subtraction for you so you can see what's left — a toggle also offers to subtract it from that month's Available now, worth leaving on so Available now reflects money you've actually spent. A fund can't go below $0: if an entry would push it past its budget, check “Unplanned” to log it anyway — it still counts in reports under that fund's category, it just won't drag the fund's remaining negative. Flip on “Cash fund” when adding one for money you've already set aside separately — physical cash, a separate account. A cash fund tracks a running balance instead of a monthly budget: it doesn't reset each month, and it doesn't reduce Available now, since that money was never part of it to begin with. Spending against it logs the same way as any fund; correcting the balance itself (say, after counting your wallet) is a separate “Adjust balance” action from the fund's edit screen, which logs the difference as an adjustment rather than quietly overwriting the number." },
   { id:"help-spending-needs-fund", title:"Why every spending entry needs a fund",
     body:"Every spending entry ties to a Fund, with an “Unplanned” checkbox for anything beyond that fund's budget. There's no free-text category here on purpose — a fund's budget limit only means something if spending can't quietly slip past it under a different label. Bills aren't selectable from spending entries at all; they're tracked through their own pay screen instead." },
   { id:"help-track-paid", title:"Track what's paid",
@@ -4505,8 +4582,9 @@ function openExpenseForm(id, defaultType, presetGoalId){
   var isActive = e ? !!e.active : true;
   var hasDueDay = !!(e && (e.dueDay || e.dueDay2));
   var remindOn = e ? !e.remindOff : false;
-  var amountVal = e ? num(type==="fund" ? e.budget : e.estimate) : "";
-  var amountLbl = type==="fund" ? "Monthly budget" : "Amount";
+  var isCashFund = e ? !!e.cashFund : false;
+  var amountVal = e ? num(type==="fund" ? (isCashFund ? e.startingBalance : e.budget) : e.estimate) : "";
+  var amountLbl = type==="fund" ? (isCashFund ? "Starting balance" : "Monthly budget") : "Amount";
 
   var typeBlock = '<div class="fgroup" id="expTypeBlockWrap">' + expTypeBlockHtml(type, isGoalLinked, !!e) + '</div>';
 
@@ -4520,8 +4598,10 @@ function openExpenseForm(id, defaultType, presetGoalId){
     + '<div class="fgroup"><label class="flabel">Name</label>'
     + '<input id="expName" class="field" value="'+(e?esc(e.name):"")+'" placeholder="e.g. Car payment"></div>'
     + '<div class="fgroup"><label id="expAmountLbl" class="flabel">'+amountLbl+'</label>'
-    + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
-    + '<input id="expAmount" class="tnum" inputmode="decimal" value="'+amountVal+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
+    + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem'+(isCashFund&&e?';opacity:.6':'')+'"><span>$</span>'
+    + '<input id="expAmount" class="tnum" inputmode="decimal" value="'+amountVal+'" placeholder="0" '+(isCashFund&&e?'disabled':'')+' style="padding:.6rem 0 .6rem .25rem">'+(isCashFund&&e?'':calcBtn())+'</div>'
+    + (isCashFund&&e ? ('<p class="muted" style="font-size:.72rem;margin-top:.35rem">Balance: '+usd(cashFundRemaining(e))+'. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openFundBalanceAdjust(\''+e.id+'\')">Adjust balance</button></p>') : '')
+    + '</div>'
     + '</div>'
 
     + '<div id="expBillWrap" style="margin-top:.9rem" class="'+(type==="fund"?"hidden":"")+'">'
@@ -4557,6 +4637,10 @@ function openExpenseForm(id, defaultType, presetGoalId){
     + '<select id="expFundCat" class="field" onchange="document.getElementById(\'expFundNewCatWrap\').className=this.value===\'__new\'?\'\':\'hidden\'">'+fundOpts+'</select>'
     + '<div id="expFundNewCatWrap" class="'+(fundCat==="__new"?"":"hidden")+'"><input id="expFundNewCat" class="field" style="margin-top:.5rem" placeholder="Category name"></div>'
     + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Appears in the Fund list when logging spending. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p></div>'
+    + '<div class="fgroup" style="margin-top:.9rem"><button class="field row" style="cursor:pointer" onclick="expCashFundToggle()">'
+    + '<span style="font-size:.875rem;font-weight:500">Cash fund</span>'
+    + '<span id="expCashFund" class="toggle'+(isCashFund?" on":"")+'" data-on="'+(isCashFund?1:0)+'"><span class="knob"></span></span></button>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">For money already set aside separately — physical cash, a separate account. Spending logs against it like any fund, but it won\'t reduce Available now, and you can correct its balance anytime instead of it resetting monthly. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p></div>'
     + '</div>'
 
     + activeBlock
@@ -4645,6 +4729,14 @@ function expRemindToggle(btn){
   t.setAttribute("data-on", on?"0":"1");
   t.className = "toggle"+(on?"":" on");
 }
+function expCashFundToggle(){
+  var t = document.getElementById("expCashFund");
+  var on = t.getAttribute("data-on")==="1";
+  t.setAttribute("data-on", on?"0":"1");
+  t.className = "toggle"+(on?"":" on");
+  var lbl = document.getElementById("expAmountLbl");
+  if(lbl) lbl.textContent = on ? "Monthly budget" : "Starting balance";
+}
 function expSave(){
   var type = document.getElementById("expType").value;
   var name = document.getElementById("expName").value.trim();
@@ -4661,7 +4753,14 @@ function expSave(){
     var fCatSel = document.getElementById("expFundCat").value;
     var fCat = fCatSel==="__new" ? document.getElementById("expFundNewCat").value.trim() : fCatSel;
     if(!fCat) return fail("Pick or type a category.");
-    var fexp = { id: editId || ("e"+Date.now()), type:"fund", name:name, budget:amount, category:fCat, active:active };
+    var cashEl = document.getElementById("expCashFund");
+    var isCash = !!(cashEl && cashEl.getAttribute("data-on")==="1");
+    var priorFund = prior && prior.type==="fund" ? prior : null;
+    var fexp = isCash
+      ? { id: editId || ("e"+Date.now()), type:"fund", name:name, cashFund:true,
+          startingBalance: (priorFund && priorFund.cashFund) ? num(priorFund.startingBalance) : amount,
+          category:fCat, active:active }
+      : { id: editId || ("e"+Date.now()), type:"fund", name:name, budget:amount, category:fCat, active:active };
     var ffound = false;
     S.expenses = S.expenses.map(function(x){ if(x.id===fexp.id){ffound=true; return fexp;} return x; });
     if(!ffound) S.expenses.push(fexp);
@@ -4929,6 +5028,7 @@ function handleHardwareBack(){
   if(settingsSubScreen){ closeSettingsSection(); return; }
   if(toolsSubScreen==="reports" && reportSubMode){ closeReportSection(); return; }
   if(toolsSubScreen){ closeToolsSection(); return; }
+  if(view.screen!=="month"){ go("month"); return; }
   try{ window.Capacitor.Plugins.App.exitApp(); }catch(e){ /* best effort */ }
 }
 function initHardwareBack(){
