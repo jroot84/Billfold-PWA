@@ -461,7 +461,10 @@ function catColor(cat){
   var i = S.categories.indexOf(cat);
   return CHART_COLORS[(i<0?0:i)%CHART_COLORS.length];
 }
-function isSkipped(b, y, m){ return !!(b.skipMonths && b.skipMonths.indexOf(mk(y,m))>=0); }
+function isSkipped(b, y, m, occ){
+  var d = S.months[mk(y,m)];
+  return !!(d && d.skipped && d.skipped[leftKey(b.id, occ||1)]);
+}
 
 /* ---------- seed data (fresh install / Start Over) ---------- */
 function seedState(){
@@ -795,6 +798,29 @@ function ensureStateDefaultsAndMigrations(){
     })();
     S._migratedDebtsPayoffMethod = true;
   }
+  /* Skip used to be a whole-month, whole-bill flag. It's now tracked per occurrence (the same
+     way paid status already is), so a semimonthly or payday bill's payments can be skipped
+     independently. Convert any existing skipMonths entries into the new shape — marking every
+     occurrence that bill had that month as skipped, since that's what actually happened before
+     (there was no way to skip just one occurrence yet). */
+  if(!S._migratedSkipToPerOccurrence){
+    S.expenses.forEach(function(b){
+      if(!b.skipMonths || !b.skipMonths.length) return;
+      b.skipMonths.forEach(function(monthKey){
+        var parts = monthKey.split("-");
+        var y = parseInt(parts[0],10), m = parseInt(parts[1],10);
+        if(isNaN(y) || isNaN(m)) return;
+        if(!S.months[monthKey]) S.months[monthKey] = emptyMonth();
+        var data = S.months[monthKey];
+        if(!data.skipped) data.skipped = {};
+        billOccurrencesInMonth(b, y, m).forEach(function(occ){
+          data.skipped[leftKey(b.id, occ)] = true;
+        });
+      });
+      delete b.skipMonths;
+    });
+    S._migratedSkipToPerOccurrence = true;
+  }
   S.savingsEntries = S.savingsEntries.map(function(e){
     var amt = num(e.amount);
     var type = e.type || (amt < 0 ? "withdrawal" : "deposit");
@@ -854,7 +880,7 @@ var calcTargetInput = null;     // the input a popup calc will write back to
 /* investment calculator inputs now live in S.calc so they persist (see migration near S init) */
 
 /* ---------- derived ---------- */
-function emptyMonth(){ return {balance:0,oneTime:0,left:{},varPaid:{},payMethod:{}}; }
+function emptyMonth(){ return {balance:0,oneTime:0,left:{},varPaid:{},payMethod:{},skipped:{}}; }
 /* One-time expenses used to be two separate things: 3 named "card" slots, plus a single
    unnamed "One-time expenses" amount. They've been merged into just the 3 named slots
    (see S.cardNames). This folds any old per-month oneTime amount into the first slot once,
@@ -937,53 +963,6 @@ function migrateJournalEntries(){
 }
 function billsList(){ return S.expenses.filter(function(e){ return e.type==="variable"; }); }
 function fundsList(){ return S.expenses.filter(function(e){ return e.type==="fund"; }); }
-// A cash fund tracks real money already set aside — physical cash, a separate account — so it
-// never resets monthly and never reduces Available now. Its remaining balance is the starting
-// amount, minus everything ever spent against it, plus any manual corrections ("adjustments"),
-// all computed from the same journal entries a regular fund already uses — nothing about saving
-// or editing a spending entry needs to change for this to work.
-function fundAllTimeSpent(fund){
-  return S.journal.reduce(function(sum, e){
-    if(e.fundId !== fund.id || e.adjustment) return sum;
-    return sum + num(e.amount);
-  }, 0);
-}
-function fundAllTimeAdjustments(fund){
-  return S.journal.reduce(function(sum, e){
-    if(e.fundId !== fund.id || !e.adjustment) return sum;
-    return sum + num(e.adjustmentDelta);
-  }, 0);
-}
-function cashFundRemaining(fund){
-  return num(num(fund.startingBalance) - fundAllTimeSpent(fund) + fundAllTimeAdjustments(fund));
-}
-var fundAdjustId = null;
-function openFundBalanceAdjust(fundId){
-  var f = S.expenses.filter(function(x){ return x.id===fundId; })[0];
-  if(!f) return;
-  fundAdjustId = fundId;
-  var current = cashFundRemaining(f);
-  modal("Adjust "+esc(f.name)+"'s balance",
-    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">Current balance: '+usd(current)+'. Enter what it should actually be — the difference gets logged as a balance adjustment, not counted as spending.</p>'
-    + '<label class="flabel">New balance</label>'
-    + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
-    + '<input id="fundAdjustInput" class="tnum" inputmode="decimal" value="'+current+'" style="padding:.6rem 0 .6rem .25rem" onkeydown="if(event.key===\'Enter\')fundBalanceAdjustSave()">'+calcBtn()+'</div>'
-    + '<button class="btn btn-pine" style="width:100%;margin-top:1rem" onclick="fundBalanceAdjustSave()">Save</button>');
-  var inp = document.getElementById("fundAdjustInput");
-  if(inp){ inp.focus(); inp.select(); }
-}
-function fundBalanceAdjustSave(){
-  var inp = document.getElementById("fundAdjustInput");
-  if(!fundAdjustId || !inp) return;
-  var f = S.expenses.filter(function(x){ return x.id===fundAdjustId; })[0];
-  if(!f){ closeModal(); return; }
-  var delta = num(num(inp.value) - cashFundRemaining(f));
-  if(delta!==0){
-    S.journal.push({ id:"j"+Date.now(), date:new Date().toISOString().slice(0,10), note:"Balance adjustment",
-      amount:0, fundId:f.id, adjustment:true, adjustmentDelta:delta });
-  }
-  persist(); closeModal(); render();
-}
 
 /* ---------- Debts / Credit ----------
    A debt/credit balance is always live — no monthly reset, no interest calc, no separate
@@ -1164,7 +1143,7 @@ function openDebtPay(debtId){
   var opts = paymentOptions(debtId);
   var currentMethod = debt.defaultPayMethod || "available";
   var methodBlock = opts.length>1
-    ? '<div class="fgroup"><label class="flabel">Pay with</label>'
+    ? '<div class="fgroup" style="margin-top:.9rem"><label class="flabel">Pay with</label>'
       + '<select id="debtPayMethodSel" class="field">'
       + opts.map(function(o){ return '<option value="'+esc(o.id)+'"'+(o.id===currentMethod?" selected":"")+'>'+esc(o.name)+'</option>'; }).join("")
       + '</select></div>'
@@ -1260,8 +1239,10 @@ function restOfYear(){
     var data = S.months[mk(view.y,m)] || emptyMonth();
     billsList().forEach(function(b){
       if(!dueInMonth(b,m)) return;
-      if(isSkipped(b, view.y, m)) return;
-      billOccurrencesInMonth(b, view.y, m).forEach(function(occ){ sum += leftOf(b,data,occ); });
+      billOccurrencesInMonth(b, view.y, m).forEach(function(occ){
+        if(isSkipped(b, view.y, m, occ)) return;
+        sum += leftOf(b,data,occ);
+      });
     });
     fundsList().forEach(function(f){
       if(!f.active) return;
@@ -1283,6 +1264,7 @@ function touchMonth(){
   if(S.months[k].oneTime===undefined) S.months[k].oneTime = 0;
   if(!S.months[k].varPaid) S.months[k].varPaid = {};
   if(!S.months[k].payMethod) S.months[k].payMethod = {};
+  if(!S.months[k].skipped) S.months[k].skipped = {};
   return S.months[k];
 }
 function patchMonthField(field, val){ touchMonth()[field] = num(val); persist(); render(); }
@@ -1410,9 +1392,9 @@ function setMonthSort(key){ monthSort = key; closeModal(); render(); }
 // A semimonthly bill counts as fully paid only once both occurrences are settled; skipped
 // bills are never treated as "paid" here, so Hide Paid doesn't also hide skipped ones.
 function isBillFullyPaid(b, data){
-  if(isSkipped(b, view.y, view.m)) return false;
   var occs = billOccurrencesInMonth(b, view.y, view.m);
-  return occs.length>0 && occs.every(function(occ){ return leftOf(b,data,occ)===0; });
+  if(occs.length===0) return false;
+  return occs.every(function(occ){ return !isSkipped(b, view.y, view.m, occ) && leftOf(b,data,occ)===0; });
 }
 function monthVisibleBills(bills, data){
   var list = bills.slice();
@@ -1449,21 +1431,22 @@ function monthBillListHtml(bills, data){
 }
 function monthScreen(){
   var data = md(), bills = dueBills();
-  var countable = bills.filter(function(b){ return !isSkipped(b, view.y, view.m); });
   var debtItems = visibleDebtCreditItems();
-  var totalDue=0, stillDue=0, paidCount=0;
-  countable.forEach(function(b){
-    var occs = billOccurrencesInMonth(b, view.y, view.m);
+  var totalDue=0, stillDue=0, paidCount=0, countableBillCount=0;
+  bills.forEach(function(b){
+    var occs = billOccurrencesInMonth(b, view.y, view.m).filter(function(occ){ return !isSkipped(b, view.y, view.m, occ); });
+    if(occs.length===0) return; // every occurrence this bill has this month is skipped
+    countableBillCount++;
     var full = 0, left = 0;
     occs.forEach(function(occ){ full += fullAmountFor(b,data,occ); left += leftOf(b,data,occ); });
     totalDue += full; stillDue += left;
-    if(occs.length>0 && left===0) paidCount++;
+    if(left===0) paidCount++;
   });
   debtItems.forEach(function(d){
     totalDue += debtDueAmount(d); stillDue += debtLeftOf(d, view.y, view.m);
     if(debtLeftOf(d, view.y, view.m)===0) paidCount++;
   });
-  var countableTotal = countable.length + debtItems.length;
+  var countableTotal = countableBillCount + debtItems.length;
   var cardsTotal = num(data.oneTime);
   var activeFunds = fundsList().filter(function(f){ return f.active && !f.cashFund; });
   var fundsLeft = activeFunds.reduce(function(s,f){
@@ -1557,18 +1540,26 @@ function monthScreen(){
   h += monthBillListHtml(visible, data) + '</section>';
   return h;
 }
+// occ is either a small int (1, or 2 for semimonthly) or a date string (for payday bills).
+// Embedding it into an onclick attribute needs different treatment for each — a bare number
+// works as-is, but a bare date string like 2026-07-03 gets evaluated as *subtraction* by the
+// browser (2026 minus 7 minus 3) instead of passed through, silently writing to a nonsense key
+// unrelated to the real occurrence. Wrapping strings in single quotes (matching the convention
+// used for ids elsewhere) avoids colliding with the enclosing onclick="..." attribute's own
+// double quotes.
+function occArg(occ){ return typeof occ === "string" ? "'"+occ+"'" : occ; }
 function monthBillRow(b, data, occ, subtitle){
   var linked = !!b.linkedGoalId;
-  var skipped = isSkipped(b, view.y, view.m);
+  var skipped = isSkipped(b, view.y, view.m, occ);
   var full = fullAmountFor(b, data, occ);
   var l = leftOf(b,data,occ), paid = !skipped && l===0;
-  var checkOnclick = skipped ? ("openPay('"+b.id+"', "+occ+")") : ("togglePaid('"+b.id+"', "+occ+")");
+  var checkOnclick = skipped ? ("openPay('"+b.id+"', "+occArg(occ)+")") : ("togglePaid('"+b.id+"', "+occArg(occ)+")");
   var statusColor = skipped ? "var(--sub)" : (paid ? "var(--pine)" : "var(--amber)");
   var statusText = skipped ? "Skipped" : (paid ? "Paid" : "Due");
   var checkAria = skipped ? "Skipped this month" : (paid ? "Mark unpaid" : "Mark paid");
   return '<li><div class="bill-li">'
     + '<button class="checkbtn'+(paid?" paid":"")+(skipped?" skipped":"")+'" aria-label="'+checkAria+'" onclick="'+checkOnclick+'">'+(skipped?icon("x",13):(paid?icon("check",15):""))+'</button>'
-    + '<button class="bill-main" onclick="openPay(\''+b.id+'\', '+occ+')">'
+    + '<button class="bill-main" onclick="openPay(\''+b.id+'\', '+occArg(occ)+')">'
     + '<div><div class="bill-name'+(paid?" done":"")+'">'+esc(b.name)+(linked?' <i class="row-goal" aria-hidden="true" style="font-size:.7rem;color:var(--pine)" title="Linked to a savings goal">'+icon("target",11)+'</i>':'')+'</div>'
     + '<div class="bill-cat">'+(monthSort==="cat_group"
         ? (subtitle||'')
@@ -1911,15 +1902,12 @@ function fundsSortEntries(list){
 }
 function fundsSection(){
   var active = fundsList().filter(function(f){ return f.active; });
-  var budgetFunds = active.filter(function(f){ return !f.cashFund; });
-  var cashFunds = active.filter(function(f){ return f.cashFund; });
-  var budgetTotal = budgetFunds.reduce(function(s,f){ return s+num(f.budget); },0);
-  var spentTotal = budgetFunds.reduce(function(s,f){ return s+fundSpentInMonth(f, view.y, view.m); },0);
-  var leftTotal = budgetFunds.reduce(function(s,f){ return s+Math.max(0, num(f.budget)-fundSpentInMonth(f, view.y, view.m)); },0);
-  var cashTotal = cashFunds.reduce(function(s,f){ return s+cashFundRemaining(f); },0);
+  var budgetTotal = active.reduce(function(s,f){ return s+num(f.budget); },0);
+  var spentTotal = active.reduce(function(s,f){ return s+fundSpentInMonth(f, view.y, view.m); },0);
+  var leftTotal = active.reduce(function(s,f){ return s+Math.max(0, num(f.budget)-fundSpentInMonth(f, view.y, view.m)); },0);
 
   var h = '<section class="card pad"><h2 class="eyebrow">Funds — '+MS[view.m-1]+' '+view.y+'</h2>'
-    + '<p class="muted" style="font-size:.85rem;margin-bottom:.75rem">Budgeted amounts for spending that varies month to month — groceries, gas, and the like. Cash funds track money already set aside separately and don\'t affect Available now. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p>';
+    + '<p class="muted" style="font-size:.85rem;margin-bottom:.75rem">Budgeted amounts for spending that varies month to month — groceries, gas, and the like. A cash fund works exactly the same way, for spending you pay for with cash instead of your tracked balance or a card — it just never touches Available now. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p>';
   if(fundsList().length===0){
     h += '<p class="muted" style="font-size:.9rem">No funds yet. Tap the add button below to set your first budget.</p>'
       + '</section>';
@@ -1930,8 +1918,6 @@ function fundsSection(){
     + '<div class="divider"></div>'
     + '<div class="row"><span class="lbl">Left across all funds</span>'
     + '<span class="tnum" style="font-weight:800;color:'+(leftTotal>=0?"var(--pine)":"var(--red)")+'">'+usd(leftTotal)+'</span></div>'
-    + (cashFunds.length ? ('<div class="divider"></div><div class="row"><span class="muted" style="font-size:.85rem">Cash on hand</span>'
-      + '<span class="tnum" style="font-weight:700">'+usd(cashTotal)+'</span></div>') : '')
     + '</section>';
 
   var chips = [];
@@ -1967,33 +1953,20 @@ function fundsSection(){
 
   h += '<section class="card">';
   visible.forEach(function(f, i){
-    var rowInner;
-    if(f.cashFund){
-      var remaining = cashFundRemaining(f);
-      rowInner = '<div class="row" style="margin-bottom:.1rem">'
-        + '<span style="display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:.9rem'+(f.active?'':';color:var(--sub)')+'">'
-        + '<span class="cat-dot" style="background:'+catColor(f.category)+'"></span>'+esc(f.name)
-        + (f.active?'':' <span style="font-size:.7rem;font-weight:500;padding:.1rem .35rem;border-radius:.25rem;background:var(--line);color:var(--sub)">Paused</span>')
-        + '</span>'
-        + '<span class="tnum" style="font-weight:700;font-size:.9rem;color:'+(remaining<0?"var(--red)":"var(--pine)")+'">'+usd(remaining)+'</span>'
-        + '</div>'
-        + '<div class="bill-cat">'+esc(f.category)+' · Cash fund</div>';
-    } else {
-      var spent = fundSpentInMonth(f, view.y, view.m);
-      var budget = num(f.budget);
-      var left = Math.max(0, budget - spent);
-      var pct = budget>0 ? Math.max(0, Math.min(100, spent/budget*100)) : 0;
-      var over = spent > budget;
-      rowInner = '<div class="row" style="margin-bottom:.1rem">'
-        + '<span style="display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:.9rem'+(f.active?'':';color:var(--sub)')+'">'
-        + '<span class="cat-dot" style="background:'+catColor(f.category)+'"></span>'+esc(f.name)
-        + (f.active?'':' <span style="font-size:.7rem;font-weight:500;padding:.1rem .35rem;border-radius:.25rem;background:var(--line);color:var(--sub)">Paused</span>')
-        + '</span>'
-        + '<span class="tnum" style="font-weight:700;font-size:.9rem;color:'+(over?"var(--red)":"var(--pine)")+'">'+usd(left)+' left</span>'
-        + '</div>'
-        + '<div class="bill-cat" style="margin-bottom:.4rem">'+esc(f.category)+' · '+usd(spent)+' of '+usd(budget)+' spent</div>'
-        + '<div class="cat-bar"><div class="fill" style="width:'+pct+'%;background:'+(over?"var(--red)":"var(--pine)")+'"></div></div>';
-    }
+    var spent = fundSpentInMonth(f, view.y, view.m);
+    var budget = num(f.budget);
+    var left = Math.max(0, budget - spent);
+    var pct = budget>0 ? Math.max(0, Math.min(100, spent/budget*100)) : 0;
+    var over = spent > budget;
+    var rowInner = '<div class="row" style="margin-bottom:.1rem">'
+      + '<span style="display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:.9rem'+(f.active?'':';color:var(--sub)')+'">'
+      + '<span class="cat-dot" style="background:'+catColor(f.category)+'"></span>'+esc(f.name)
+      + (f.active?'':' <span style="font-size:.7rem;font-weight:500;padding:.1rem .35rem;border-radius:.25rem;background:var(--line);color:var(--sub)">Paused</span>')
+      + '</span>'
+      + '<span class="tnum" style="font-weight:700;font-size:.9rem;color:'+(over?"var(--red)":"var(--pine)")+'">'+usd(left)+' left</span>'
+      + '</div>'
+      + '<div class="bill-cat" style="margin-bottom:.4rem">'+esc(f.category)+' · '+usd(spent)+' of '+usd(budget)+' spent'+(f.cashFund?' · Cash fund':'')+'</div>'
+      + '<div class="cat-bar"><div class="fill" style="width:'+pct+'%;background:'+(over?"var(--red)":"var(--pine)")+'"></div></div>';
     h += (i>0 ? '<div class="divider"></div>' : '')
       + '<button style="width:100%;text-align:left;display:block;padding:.85rem 1rem'+(i===0?' 0':'')+'" onclick="openExpenseForm(\''+f.id+'\')">'
       + rowInner
@@ -2050,7 +2023,7 @@ function calcSection(){
   return seg + (isInv ? investScreen() : calcInlineScreen());
 }
 var REPORT_SECTIONS = [
-  ["bills","Bills","What you can expect to spend","list"],
+  ["bills","Budget","What you can expect to spend, bills and funds together","list"],
   ["spending","Spending","Where your money's actually going","pie"],
   ["savings","Savings","Track progress toward your goals","trend"]
 ];
@@ -2085,7 +2058,7 @@ function reportsSection(){
   }
   // Drilled into a specific report: its own back header (to the Reports hub, not all the way
   // to Tools) plus the Month/Year scope toggle where it applies.
-  var titles = {bills:"Bills report", spending:"Spending report", savings:"Savings report", debts:"Debts report"};
+  var titles = {bills:"Budget", spending:"Spending report", savings:"Savings report", debts:"Debts report"};
   var pStyle = "padding:.28rem .5rem;font-size:.76rem";
   var scopeSeg = "";
   if(reportSubMode==="bills"){
@@ -2106,14 +2079,25 @@ function reportsSection(){
 function billsReportBody(){
   var byCat = {};
   function add(c,v){ byCat[c]=(byCat[c]||0)+v; }
+  // Always the estimate, never what was actually paid — this report answers "what's expected
+  // this period," which shouldn't change just because some of it has already been paid. Actual
+  // amounts belong to the Spending report instead. Each occurrence a bill has that month (2 for
+  // semimonthly, 2-3 for payday) counts separately, since they share one estimate but both cost.
   if(reportScope==="month"){
-    var data1 = monthDataAt(view.y,view.m);
-    billsList().forEach(function(b){ if(dueInMonth(b,view.m) && !isSkipped(b,view.y,view.m)) add(b.category,fullAmountFor(b,data1,1)); });
+    var y1 = view.y, m1 = view.m;
+    billsList().forEach(function(b){
+      if(!dueInMonth(b,m1)) return;
+      var occs = billOccurrencesInMonth(b,y1,m1).filter(function(occ){ return !isSkipped(b,y1,m1,occ); });
+      add(b.category, num(b.estimate) * occs.length);
+    });
     fundsList().forEach(function(f){ if(f.active) add(f.category, num(f.budget)); });
   }else{
     for(var m=1;m<=12;m++){
-      var dataM = monthDataAt(view.y,m);
-      billsList().forEach(function(b){ if(dueInMonth(b,m) && !isSkipped(b,view.y,m)) add(b.category,fullAmountFor(b,dataM,1)); });
+      billsList().forEach(function(b){
+        if(!dueInMonth(b,m)) return;
+        var occs = billOccurrencesInMonth(b,view.y,m).filter(function(occ){ return !isSkipped(b,view.y,m,occ); });
+        add(b.category, num(b.estimate) * occs.length);
+      });
     }
     fundsList().forEach(function(f){ if(f.active) add(f.category, num(f.budget)*12); });
   }
@@ -2157,7 +2141,7 @@ function billsReportBody(){
     + '<span class="tnum" style="font-weight:700;color:'+(diff>=0?"var(--pine)":"var(--red)")+'">'
     + (diff>=0 ? usd(diff)+" left over" : usd(-diff)+" over")+'</span></div>'
     + '</section>'
-    + '<p class="muted" style="font-size:.75rem;text-align:center;padding:0 1rem">Includes active bills at their scheduled amounts and active funds at their monthly budget. Paused bills and funds aren\'t counted.</p>';
+    + '<p class="muted" style="font-size:.75rem;text-align:center;padding:0 1rem">Estimated amounts, whether or not they\'ve been paid yet — active bills (and each of their payments, for anything due more than once a month) at their default amount, active funds at their monthly budget, cash funds included. Paused bills, paused funds, and skipped payments aren\'t counted. See actual spending in the Spending report instead.</p>';
   return h;
 }
 function spendingReportBody(){
@@ -3096,6 +3080,22 @@ function jfBalanceMonthLabel(dateStr){
 // all — e.g. it's already accounted for elsewhere. So "Don't adjust a balance" sits alongside
 // Available Balance and any credit-flagged debt.
 function jfMethodOptions(){ return paymentOptions(); }
+// Cash-fund spending is paid with cash you've already set aside — it never reduces Available
+// now or charges a card, so there's no real choice to offer. Every other fund gets the normal
+// Pay with selector.
+function jfMethodBlockHtml(fund, startMethod, date){
+  if(fund && fund.cashFund){
+    return '<label class="flabel">Pay with</label>'
+      + '<div class="field" style="display:flex;align-items:center;color:var(--sub)">Cash</div>'
+      + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Cash spending doesn\u2019t touch Available now or any card — it\u2019s just tracked here.</p>';
+  }
+  var methodOpts = jfMethodOptions().map(function(o){
+    return '<option value="'+esc(o.id)+'"'+(o.id===startMethod?" selected":"")+'>'+esc(o.name)+'</option>';
+  }).join("");
+  return '<label class="flabel">Pay with</label>'
+    + '<select id="jfMethodSel" class="field" onchange="jfMethodChanged()">'+methodOpts+'</select>'
+    + '<p id="jfMethodNote" class="muted" style="font-size:.72rem;margin-top:.35rem">'+jfMethodCaption(startMethod, date)+'</p>';
+}
 function jfMethodCaption(method, dateStr){
   if(method==="none") return "Won't touch any balance — good if this is already accounted for elsewhere.";
   if(method==="available") return "Reduces "+jfBalanceMonthLabel(dateStr)+"'s Available now automatically.";
@@ -3115,6 +3115,7 @@ function openJournalForm(id){
   var date = e ? e.date : today;
   var activeFunds = fundsList().filter(function(f){ return f.active; });
   var fundId = e ? (e.fundId||"") : (activeFunds[0] ? activeFunds[0].id : "");
+  var fund = fundsList().filter(function(f){ return f.id===fundId; })[0];
   var unplanned = e ? !!e.unplanned : false;
   // Figure out the starting payment method, including for older entries saved before this
   // selector existed (a truthy balanceAdjust meant Available Balance; a debtId meant that
@@ -3159,9 +3160,7 @@ function openJournalForm(id){
     + '<p id="jfUnplannedNote" class="muted" style="font-size:.72rem;margin-top:.35rem">'+(unplanned
         ? "On — won't push the fund's remaining below $0."
         : "Off — counts against the fund's budget as usual.")+' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p></div>'
-    + '<div class="fgroup"><label class="flabel">Pay with</label>'
-    + '<select id="jfMethodSel" class="field" onchange="jfMethodChanged()">'+methodOpts+'</select>'
-    + '<p id="jfMethodNote" class="muted" style="font-size:.72rem;margin-top:.35rem">'+jfMethodCaption(startMethod, date)+'</p></div>'
+    + '<div id="jfMethodWrap" class="fgroup">'+jfMethodBlockHtml(fund, startMethod, date)+'</div>'
     + '<p id="jfErr" class="msg-err" style="display:none"></p>'
     + '<button class="btn btn-pine" style="width:100%;margin-top:1rem;padding:.8rem" onclick="jfSave()">'+(e?"Save changes":"Add entry")+'</button>'
     + (e ? '<button id="jfDel" class="btn btn-danger" style="width:100%;margin-top:.5rem" onclick="jfDelete()">Delete this entry</button>' : ''));
@@ -3174,11 +3173,6 @@ function jfFundBalance(fundId, date){
   var fund = fundsList().filter(function(f){ return f.id===fundId; })[0];
   if(!fund) return "";
   var prev = jEditId ? S.journal.filter(function(x){ return x.id===jEditId; })[0] : null;
-  if(fund.cashFund){
-    var remainingNow = cashFundRemaining(fund);
-    if(prev && prev.fundId===fund.id && !prev.adjustment) remainingNow += num(prev.amount);
-    return usd(remainingNow) + " balance" + (remainingNow<0 ? " (already negative)" : "");
-  }
   var fd = new Date(date+"T00:00:00");
   if(isNaN(fd)) return "";
   var fy = fd.getFullYear(), fm = fd.getMonth()+1;
@@ -3196,6 +3190,9 @@ function jfFundChanged(){
   var note = document.getElementById("jfFundBalance");
   if(!fundSel || !note) return;
   note.textContent = jfFundBalance(fundSel.value, dateInp ? dateInp.value : "");
+  var fund = fundsList().filter(function(f){ return f.id===fundSel.value; })[0];
+  var methodWrap = document.getElementById("jfMethodWrap");
+  if(methodWrap) methodWrap.innerHTML = jfMethodBlockHtml(fund, "available", dateInp ? dateInp.value : "");
 }
 // Reverses whatever effect a saved entry actually had, whichever shape it was saved under —
 // the old always-on balance toggle, the old direct-debt-payment mode, or the current
@@ -3224,13 +3221,7 @@ function jfSave(){
   var fund = fundsList().filter(function(f){ return f.id===fundId; })[0];
   if(!fund) return fail("Pick a fund — every spending entry ties to one.");
 
-  if(!unplanned && fund.cashFund){
-    var cashRemaining = cashFundRemaining(fund);
-    if(prev && prev.fundId===fund.id && !prev.adjustment) cashRemaining += num(prev.amount);
-    if(amount - cashRemaining > 0.005){
-      return fail("That's "+usd(amount-cashRemaining)+" more than "+esc(fund.name)+" has left ("+usd(Math.max(0,cashRemaining))+" remaining). Check \u201cUnplanned\u201d to log it without pushing the balance below $0.");
-    }
-  } else if(!unplanned){
+  if(!unplanned){
     var fd = new Date(date+"T00:00:00");
     var fy = fd.getFullYear(), fm = fd.getMonth()+1;
     var spentSoFar = fundSpentInMonth(fund, fy, fm);
@@ -3249,7 +3240,7 @@ function jfSave(){
   jfRevertEntry(prev);
 
   var methodSel = document.getElementById("jfMethodSel");
-  var method = methodSel ? methodSel.value : "available";
+  var method = fund.cashFund ? "none" : (methodSel ? methodSel.value : "available");
   var d = new Date(date+"T00:00:00");
   var balanceAdjust = null;
   if(method==="available") balanceAdjust = { y:d.getFullYear(), m:d.getMonth()+1, amount:amount };
@@ -3813,10 +3804,10 @@ function nextReminderFireAt(b){
     var m = startM + i, y = startY;
     while(m>12){ m-=12; y++; }
     if(!dueInMonth(b,m)) continue;
-    if(isSkipped(b,y,m)) continue;
     occurrences.forEach(function(day, idx){
       if(!day) return;
       var occ = idx+1;
+      if(isSkipped(b,y,m,occ)) return;
       if(billLeftAt(y,m,b.id,occ) === 0) return; // already paid, skip
       var actualDay = Math.min(day, new Date(y,m,0).getDate());
       var due = new Date(y, m-1, actualDay, 9, 0, 0);
@@ -4114,7 +4105,7 @@ function incomeSectionHtml(){
     var count = paychecksInMonth(view.y, view.m);
     var proj = monthlyIncomeFor(view.y, view.m);
     h += '<div class="grid2">'
-      + '<div class="fgroup"><label class="flabel">Paycheck amount (take-home)</label>'
+      + '<div class="fgroup"><label class="flabel">Paycheck amount</label>'
       + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
       + '<input id="incPaycheck" class="tnum" inputmode="decimal" value="'+(S.paycheckAmount?num(S.paycheckAmount):"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem" onchange="saveIncomeFields()">'+calcBtn()+'</div></div>'
       + '<div class="fgroup"><label class="flabel">Frequency</label>'
@@ -4124,13 +4115,14 @@ function incomeSectionHtml(){
       + '</div>'
       + '<div class="fgroup" style="margin-top:.9rem"><label class="flabel">Last paycheck date</label>'
       + '<input id="incLastDate" type="date" class="field" value="'+esc(S.lastPaycheckDate||"")+'" onchange="saveIncomeFields()"></div>'
-      + '<p class="muted" style="font-size:.72rem;margin:.35rem 0 .9rem">Use what actually lands in your account, after taxes and deductions — that\'s what makes the comparisons accurate. '
+      + '<p class="muted" style="font-size:.72rem;margin:.35rem 0 .9rem">'
       + (num(S.paycheckAmount)>0 && S.lastPaycheckDate
           ? "≈ "+usd(proj)+" this month ("+count+" paycheck"+(count===1?"":"s")+"), based on your schedule."
           : "Enter an amount and your last paycheck date to project this month's income.")
-      + ' Used for comparisons in Reports and here — never affects Available now. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-income\')">More info</button></p>';
+      + ' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-income\')">More info</button></p>';
   } else {
-    h += moneyRow("Monthly income (take-home)", S.income, "S.income=num(this.value);persist();render()");
+    h += moneyRow("Monthly income", S.income, "S.income=num(this.value);persist();render()")
+      + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Use what actually lands in your account, after taxes and deductions. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-income\')">More info</button></p>';
   }
   return h;
 }
@@ -4391,8 +4383,8 @@ var HELP_ITEMS = [
       + "<li><b>Don\u2019t adjust a balance</b> — for anything already accounted for elsewhere.</li>"
       + "<li>A card — adds to its balance instead of touching your cash.</li>"
       + "</ul>"
-      + '<p class="help-p">Pick a card and check <b>Set as default for this bill</b> to have it pre-selected every month, instead of defaulting back to Available Balance — or set <b>Usually paid with</b> right on the expense itself (Bills → edit the expense) to do the same thing ahead of time.</p>'
-      + '<p class="help-p"><b>Skip</b> — an unpaid bill can also be skipped for the month: tap <b>Skip this month</b> from its pay screen. A skipped bill won\u2019t count toward what\u2019s due, and any reminder for it stays quiet.</p>'
+      + '<p class="help-p">Choosing a card here only applies to this one payment — to make it the bill\u2019s default going forward, set <b>Pay with</b> right on the expense itself (Bills → edit the expense) instead.</p>'
+      + '<p class="help-p"><b>Skip</b> — an unpaid bill can also be skipped: tap <b>Skip this payment</b> from its pay screen. For a bill with more than one payment a month (semimonthly, or tied to payday), this only skips that one payment — the others still show up normally. A skipped payment won\u2019t count toward what\u2019s due, and any reminder for it stays quiet.</p>'
       + '<p class="help-p">Expenses linked to a savings goal work a little differently — see <i>Expenses that feed a savings goal</i>.</p>' },
   { id:"help-income", title:"Set up your income",
     body:"<p>To set up your income:</p>"
@@ -4422,7 +4414,7 @@ var HELP_ITEMS = [
       + '<p class="help-p">This is independent of Category, so the expense still gets a real, reportable category of its own — \u201cSavings,\u201d \u201cTravel,\u201d whatever fits. Picking a goal locks the expense\u2019s type to Bill, since a Fund can\u2019t feed one.</p>'
       + '<p class="help-p"><b>Checking it off</b> marks it paid at the default amount and logs a matching deposit — tap the expense first to adjust the amount before confirming if you\u2019re contributing less (or more) than usual.</p>'
       + '<p class="help-p"><b>Unpaying it</b> opens the pay screen to confirm first, since it deletes the deposit. Checking it back off is instant.</p>'
-      + '<p class="help-p">Didn\u2019t make the transfer this month? Tap <b>Skip this month</b> instead — nothing gets logged.</p>' },
+      + '<p class="help-p">Didn\u2019t make the transfer this time? Tap <b>Skip this payment</b> instead — nothing gets logged.</p>' },
   { id:"help-debt-credit", title:"Track debt & credit",
     body:"<p>To add a loan or card:</p>"
       + '<ol class="help-list">'
@@ -4616,7 +4608,7 @@ function openPay(id, occ){
   var b = billsList().filter(function(x){return x.id===id;})[0];
   if(!b) return;
   var y = view.y, m = view.m;
-  var skipped = isSkipped(b, y, m);
+  var skipped = isSkipped(b, y, m, payOcc);
   var data = touchMonth();
   var full = fullAmountFor(b, data, payOcc);
   var l = leftOf(b, data, payOcc);
@@ -4627,22 +4619,17 @@ function openPay(id, occ){
   var topBlock = '<p class="muted" style="font-size:.875rem;margin-bottom:1rem">'+usd(full)+' · '+freqText(b)+occNote+'</p>';
 
   // Payment-method choice: only once there's a credit option to actually choose between —
-  // otherwise it'd just be a dropdown of one. Falls back to the bill's own default method (see
-  // setAsDefault below) when there's no payment recorded yet this month, so a recurring card
-  // charge doesn't need reselecting every month.
+  // otherwise it'd just be a dropdown of one. Falls back to the bill's own default method when
+  // there's no payment recorded yet this month. Changing it here only applies to this one
+  // payment — the bill's actual default only changes from Edit bill, not from here.
   var methodKey = leftKey(b.id, payOcc);
   var opts = paymentOptions();
   var currentMethod = (data.payMethod && data.payMethod[methodKey]) || b.defaultPayMethod || "available";
-  var isDefaultCredit = !!(b.defaultPayMethod && b.defaultPayMethod===currentMethod);
   var methodBlock = opts.length>1
-    ? '<div class="fgroup"><label class="flabel">Pay with</label>'
-      + '<select id="payMethodSel" class="field" onchange="payMethodChanged()">'
+    ? '<div class="fgroup" style="margin-top:.9rem"><label class="flabel">Pay with</label>'
+      + '<select id="payMethodSel" class="field">'
       + opts.map(function(o){ return '<option value="'+esc(o.id)+'"'+(o.id===currentMethod?" selected":"")+'>'+esc(o.name)+'</option>'; }).join("")
-      + '</select>'
-      + '<button id="payMethodDefaultRow" class="field row" style="cursor:pointer;margin-top:.5rem'+(currentMethod==="available"?';display:none':'')+'" onclick="payMethodDefaultToggle(this)">'
-      + '<span style="font-size:.8rem;font-weight:500">Set as default for this bill</span>'
-      + '<span id="payMethodDefault" class="toggle'+(isDefaultCredit?" on":"")+'" data-on="'+(isDefaultCredit?1:0)+'"><span class="knob"></span></span></button>'
-      + '</div>'
+      + '</select></div>'
     : '';
 
   var goal = b.linkedGoalId ? S.savingsGoals.filter(function(g){ return g.id===b.linkedGoalId; })[0] : null;
@@ -4672,7 +4659,7 @@ function openPay(id, occ){
             + (goalNote ? " "+goalNote : "") + '</p>'
           + '<div class="divider" style="margin:1rem 0"></div>'
           + '<div class="grid2">'
-          + '<button class="btn btn-ghost" onclick="billSkipToggle()">'+(skipped?"Clear skip — due again":"Skip this month")+'</button>'
+          + '<button class="btn btn-ghost" onclick="billSkipToggle()">'+(skipped?"Clear skip — due again":"Skip this payment")+'</button>'
           + '<button class="btn btn-ghost" onclick="closeModal();openExpenseForm(\''+b.id+'\')">Edit bill</button></div>')));
   var vinp = document.getElementById("payInput");
   if(vinp && !skipped){ vinp.focus(); vinp.select(); }
@@ -4681,34 +4668,10 @@ function getPayMethod(){
   var sel = document.getElementById("payMethodSel");
   return sel ? sel.value : undefined; // undefined = let the payment function keep whatever was used before
 }
-// Show the "Set as default" row only once a credit option is actually selected — Available
-// Balance is already everyone's implicit default, so there's nothing to opt into there.
-function payMethodChanged(){
-  var sel = document.getElementById("payMethodSel");
-  var row = document.getElementById("payMethodDefaultRow");
-  if(!sel || !row) return;
-  row.style.display = sel.value==="available" ? "none" : "";
-}
-function payMethodDefaultToggle(btn){
-  var t = document.getElementById("payMethodDefault");
-  var on = t.getAttribute("data-on")==="1";
-  t.className = "toggle"+(on?"":" on"); t.setAttribute("data-on", on?"0":"1");
-}
-// If "Set as default" is checked and a credit option is selected, remembers that choice on
-// the bill itself so future months' pay screens pre-select it instead of Available Balance.
-function applyDefaultMethodIfRequested(billId){
-  var toggle = document.getElementById("payMethodDefault");
-  var sel = document.getElementById("payMethodSel");
-  if(!toggle || !sel || sel.value==="available") return;
-  if(toggle.getAttribute("data-on")!=="1") return;
-  var b = S.expenses.filter(function(x){return x.id===billId;})[0];
-  if(b) b.defaultPayMethod = sel.value;
-}
 function varPaySave(){
   var inp = document.getElementById("payInput");
   if(payId!==null && inp){
     var b = billsList().filter(function(x){return x.id===payId;})[0];
-    applyDefaultMethodIfRequested(payId);
     var amt = num(inp.value);
     markVariablePaid(payId, amt, payOcc, getPayMethod());
     if(b && b.linkedGoalId) createGoalDeposit(b, view.y, view.m, payOcc, amt);
@@ -4733,26 +4696,22 @@ function varPayClear(){
 function billSkipToggle(){
   var b = billsList().filter(function(x){return x.id===payId;})[0];
   if(!b) return;
-  var y = view.y, m = view.m;
-  if(!b.skipMonths) b.skipMonths = [];
-  var key = mk(y,m);
-  var i = b.skipMonths.indexOf(key);
-  if(i>=0){
-    b.skipMonths.splice(i,1);
+  var y = view.y, m = view.m, occ = payOcc;
+  var data = touchMonth();
+  var key = leftKey(b.id, occ);
+  if(data.skipped[key]){
+    delete data.skipped[key];
     persist(); closeModal(); render();
     if(S.remindersOn) scheduleRemindersDebounced();
   } else {
-    var occs = billOccurrencesInMonth(b, y, m);
     if(b.linkedGoalId){
-      occs.forEach(function(occ){
-        var entry = goalDepositEntry(b.id, y, m, occ);
-        if(entry) deleteGoalDeposit(b.id, y, m, occ);
-      });
+      var entry = goalDepositEntry(b.id, y, m, occ);
+      if(entry) deleteGoalDeposit(b.id, y, m, occ);
     }
-    b.skipMonths.push(key);
-    // Clear the paid state for every occurrence this month, reversing any auto-reduce-balance
-    // adjustment — not just the one whose modal happened to be open.
-    occs.forEach(function(occ){ unmarkVariablePaid(b.id, occ); });
+    data.skipped[key] = true;
+    // Clear this occurrence's paid state, reversing any auto-reduce-balance adjustment — just
+    // this one payment, not every occurrence the bill has this month.
+    unmarkVariablePaid(b.id, occ);
     closeModal();
     showBalanceWarning();
   }
@@ -4771,7 +4730,7 @@ function expActiveBlockHtml(type, isActive, defaultPayVal, isDebtLinked, isGoalL
       + '<div class="fgroup"><label class="flabel">Status</label><button class="field row" style="cursor:pointer" onclick="expActiveToggle(this)">'
       + '<span id="expActiveLbl" style="font-size:.875rem;font-weight:500">Active'+badge+'</span>'
       + '<span id="expActive" class="toggle'+(isActive?" on":"")+'" data-on="'+(isActive?1:0)+'"><span class="knob"></span></span></button></div>'
-      + '<div class="fgroup"><label class="flabel">Usually paid with</label>'
+      + '<div class="fgroup"><label class="flabel">Pay with</label>'
       + '<select id="expDefaultPayMethod" class="field">'
       + paymentOptions().map(function(o){ return '<option value="'+esc(o.id)+'"'+(o.id===defaultPayVal?" selected":"")+'>'+esc(o.name)+'</option>'; }).join("")
       + '</select></div>'
@@ -4842,8 +4801,8 @@ function openExpenseForm(id, defaultType, presetGoalId){
   var hasDueDay = !!(e && (e.dueDay || e.dueDay2));
   var remindOn = e ? !e.remindOff : false;
   var isCashFund = e ? !!e.cashFund : false;
-  var amountVal = e ? num(type==="fund" ? (isCashFund ? e.startingBalance : e.budget) : e.estimate) : "";
-  var amountLbl = type==="fund" ? (isCashFund ? "Starting balance" : "Monthly budget") : "Amount";
+  var amountVal = e ? num(type==="fund" ? e.budget : e.estimate) : "";
+  var amountLbl = type==="fund" ? "Monthly budget" : "Amount";
 
   var typeBlock = '<div class="fgroup" id="expTypeBlockWrap">' + expTypeBlockHtml(type, isGoalLinked, !!e) + '</div>';
 
@@ -4857,9 +4816,8 @@ function openExpenseForm(id, defaultType, presetGoalId){
     + '<div class="fgroup"><label class="flabel">Name</label>'
     + '<input id="expName" class="field" value="'+(e?esc(e.name):"")+'" placeholder="e.g. Car payment"></div>'
     + '<div class="fgroup"><label id="expAmountLbl" class="flabel">'+amountLbl+'</label>'
-    + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem'+(isCashFund&&e?';opacity:.6':'')+'"><span>$</span>'
-    + '<input id="expAmount" class="tnum" inputmode="decimal" value="'+amountVal+'" placeholder="0" '+(isCashFund&&e?'disabled':'')+' style="padding:.6rem 0 .6rem .25rem">'+(isCashFund&&e?'':calcBtn())+'</div>'
-    + (isCashFund&&e ? ('<p class="muted" style="font-size:.72rem;margin-top:.35rem">Balance: '+usd(cashFundRemaining(e))+'. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openFundBalanceAdjust(\''+e.id+'\')">Adjust balance</button></p>') : '')
+    + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
+    + '<input id="expAmount" class="tnum" inputmode="decimal" value="'+amountVal+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div>'
     + '</div>'
     + '</div>'
 
@@ -5009,8 +4967,6 @@ function expCashFundToggle(){
   var on = t.getAttribute("data-on")==="1";
   t.setAttribute("data-on", on?"0":"1");
   t.className = "toggle"+(on?"":" on");
-  var lbl = document.getElementById("expAmountLbl");
-  if(lbl) lbl.textContent = on ? "Monthly budget" : "Starting balance";
 }
 function expSave(){
   var type = document.getElementById("expType").value;
@@ -5030,12 +4986,7 @@ function expSave(){
     if(!fCat) return fail("Pick or type a category.");
     var cashEl = document.getElementById("expCashFund");
     var isCash = !!(cashEl && cashEl.getAttribute("data-on")==="1");
-    var priorFund = prior && prior.type==="fund" ? prior : null;
-    var fexp = isCash
-      ? { id: editId || ("e"+Date.now()), type:"fund", name:name, cashFund:true,
-          startingBalance: (priorFund && priorFund.cashFund) ? num(priorFund.startingBalance) : amount,
-          category:fCat, active:active }
-      : { id: editId || ("e"+Date.now()), type:"fund", name:name, budget:amount, category:fCat, active:active };
+    var fexp = { id: editId || ("e"+Date.now()), type:"fund", name:name, budget:amount, category:fCat, active:active, cashFund:isCash };
     var ffound = false;
     S.expenses = S.expenses.map(function(x){ if(x.id===fexp.id){ffound=true; return fexp;} return x; });
     if(!ffound) S.expenses.push(fexp);
@@ -5066,8 +5017,7 @@ function expSave(){
   var exp = { id: editId || ("e"+Date.now()), type:type, name:name,
     estimate: type==="variable" ? amount : undefined,
     freq:freq, month: freq==="yearly"?month:undefined, dueDay:dueDay, dueDay2: freq==="semimonthly"?dueDay2:undefined,
-    category:cat, active:active, remindOff:remindOff, linkedGoalId:linkedGoalId, defaultPayMethod:defaultPayMethod,
-    skipMonths: prior ? prior.skipMonths : undefined };
+    category:cat, active:active, remindOff:remindOff, linkedGoalId:linkedGoalId, defaultPayMethod:defaultPayMethod };
   var found = false;
   S.expenses = S.expenses.map(function(x){ if(x.id===exp.id){found=true; return exp;} return x; });
   if(!found) S.expenses.push(exp);
@@ -5182,11 +5132,11 @@ function rescheduleReminders(){
         if(!b.active) return;
         if(b.remindOff) return; // muted individually in Settings → Reminders
         if(!dueInMonth(b,m)) return;
-        if(isSkipped(b,y,m)) return;
         var occurrences = b.freq==="semimonthly" ? [[1,b.dueDay],[2,b.dueDay2]] : [[1,b.dueDay]];
         occurrences.forEach(function(pair){
           var occ = pair[0], day = pair[1];
           if(!day) return;
+          if(isSkipped(b,y,m,occ)) return;
           if(billLeftAt(y,m,b.id,occ) === 0) return; // already paid, skip
           var actualDay = Math.min(day, new Date(y,m,0).getDate());
           var due = new Date(y, m-1, actualDay, 9, 0, 0);
