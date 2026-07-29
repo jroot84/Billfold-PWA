@@ -123,6 +123,10 @@
   .row .lbl{ font-size:.9rem; }
   .muted{ color:var(--sub); }
   .divider{ border-top:1px solid var(--line); margin:.85rem 0; }
+  .help-list{ padding-left:1.2rem; line-height:1.8; }
+  .help-list li{ margin-bottom:.4rem; }
+  .help-list li:last-child{ margin-bottom:0; }
+  .help-p{ margin-top:.75rem; }
 
   .money{ display:flex; align-items:center; width:146px; border:1px solid var(--line);
     border-radius:.5rem; background:var(--field); padding:0 .25rem 0 .5rem; }
@@ -4331,32 +4335,160 @@ function dtDelete(){
   persist(); closeModal(); render();
 }
 var HELP_ITEMS = [
-  { id:"help-install", title:"Install Billfold to your home screen",
-    body:"The web version works fully in a browser tab, but \u201cinstalling\u201d it adds a proper icon to your home screen that opens full-screen, with no browser bar — the closest thing to an app without going through an app store. The steps are different on Android and iPhone, since only one of them lets Billfold help directly. <b>On Android</b> (Chrome, Edge, and most other browsers): open Settings → Install Billfold and tap the button there — it's a real install prompt from the browser itself. If the button isn't showing yet, give the page a moment after loading, or look for \u201cInstall app\u201d in your browser's own menu (usually the ⋮ icon) as a fallback. <b>On iPhone or iPad</b>: this has to be done by hand — Apple doesn't let any website trigger it directly, only Safari's own Share menu can. Open Billfold in Safari (not Chrome, and not a browser tab inside another app like Gmail or Instagram — it has to be Safari itself), tap the <b>Share</b> icon in the toolbar (a square with an arrow pointing up), scroll down and tap <b>Add to Home Screen</b>, then tap <b>Add</b> in the top corner. Either way, the result behaves the same: your data stays exactly where it already is on that device, since installing doesn't move or duplicate anything — it's just a shortcut to the same browser storage Billfold was already using." },
-  { id:"help-setup-expenses", title:"Set up your expenses",
-    body:"Head to the Bills tab and tap the add button. Pick a type: Bill for anything due on a schedule — rent, insurance, a subscription, a utility bill that changes month to month. Set a default amount now; checking it off pays that amount, or tap it first to enter the real amount before confirming if a bill comes in different. Fund for a monthly budget on spending that varies (groceries, gas) — this is the only type spending entries can pull from. Bills get a category (which powers your reports) and an optional due day that unlocks a per-expense reminder toggle. \u201cEvery payday\u201d is a separate How-often option for a bill tied to your actual pay schedule instead of a calendar day — a car payment or transfer that goes out whenever you get paid. It follows Settings → Income directly, so it needs Income set to Paycheck mode with Weekly or Every-2-weeks pay; there's no due day to set and no reminder, since a paycheck-driven date drifts through the calendar rather than landing on a fixed day. Most months it's 2 payments, occasionally 3 when the cycle lines up that way — the Month tab shows however many actually fall in a given month." },
-  { id:"help-funds", title:"Budget for spending that varies",
-    body:"Add a Fund from the Bills tab and set a monthly budget. When you log spending in Log → Spending, pick that fund, and Billfold does the subtraction for you so you can see what's left — a toggle also offers to subtract it from that month's Available now, worth leaving on so Available now reflects money you've actually spent. A fund can't go below $0: if an entry would push it past its budget, check “Unplanned” to log it anyway — it still counts in reports under that fund's category, it just won't drag the fund's remaining negative. Flip on “Cash fund” when adding one for money you've already set aside separately — physical cash, a separate account. A cash fund tracks a running balance instead of a monthly budget: it doesn't reset each month, and it doesn't reduce Available now, since that money was never part of it to begin with. Spending against it logs the same way as any fund; correcting the balance itself (say, after counting your wallet) is a separate “Adjust balance” action from the fund's edit screen, which logs the difference as an adjustment rather than quietly overwriting the number." },
-  { id:"help-spending-needs-fund", title:"Why every spending entry needs a fund",
-    body:"Every spending entry ties to a Fund, with an “Unplanned” checkbox for anything beyond that fund's budget. There's no free-text category here on purpose — a fund's budget limit only means something if spending can't quietly slip past it under a different label. Bills aren't selectable from spending entries at all; they're tracked through their own pay screen instead." },
-  { id:"help-track-paid", title:"Track what's paid",
-    body:"Open the Month tab. Every bill due that month shows up on its own, pulled straight from your Bills list, in its own top section if it's a debt or credit payment. Tapping the circle marks it paid using the default amount — that's usually close enough, so checking it off is a single tap either way. If it isn't close enough, tap the bill itself first to enter the real amount before confirming; the difference adjusts Available now (or your card's balance — see below). \u201cEdit bill\u201d is right there on the pay screen either way, for changing the bill's own settings rather than this month's payment. Once something's marked paid, the amount is locked — “Mark unpaid” undoes it cleanly, reversing exactly what was charged, and brings the amount (and “Pay with,” and Skip) back into play so you can redo it correctly. If you have a debt or line of credit flagged as a payment option in Setup, a “Pay with” choice shows up on any unpaid bill — pick Available Balance, “Don't adjust a balance” if it's already accounted for elsewhere, or a card, and the amount routes there instead: a card charge adds to its balance rather than touching your cash. Pick a card and check “Set as default for this bill” to have it pre-selected every month going forward, instead of defaulting back to Available Balance each time — or set “Usually paid with” right on the expense itself, from Bills → edit the expense, which does the same thing without waiting until you're paying it. An unpaid bill can also be skipped for the month — tap “Skip this month” from its pay screen; a skipped bill won't count toward what's due, and any reminder for it stays quiet. Expenses linked to a savings goal work a little differently — see “Expenses that feed a savings goal” below." },
-  { id:"help-savings-goal", title:"Save toward a goal",
-    body:"Go to Settings → Setup (or add one the first time you open Billfold) to name a goal and set a target — you can keep up to 5 at a time. Log deposits and withdrawals against a goal from Log → Savings; each goal's card shows what's saved, what's left, and how close you are. A withdrawal can't take a goal below $0 — Billfold will cap it and tell you the most you can actually withdraw. Tap a goal any time to edit its target or delete it — deleting keeps its logged deposits on record, grouped under “Other.”" },
-  { id:"help-goal-linked-expense", title:"Expenses that feed a savings goal",
-    body:"If you already treat a recurring transfer — a travel fund, an emergency fund — like a bill, link it to a goal when adding or editing an expense: pick the goal from the “Link to a savings goal” field, right below Category. It's independent of Category, so the expense still gets a real, reportable category of its own — “Savings,” “Travel,” whatever fits — while the goal link is a separate on/off choice. Picking a goal locks the expense's type to Bill, since a Fund can't feed a goal. Checking it off marks it paid at the default amount and logs a matching deposit; tap the expense first to adjust the amount before confirming if you're contributing less (or more) than usual. Unpaying it opens the pay screen to confirm first, since it deletes the deposit — checking it back off, on the other hand, is instant. Didn't make the transfer this month? Tap “Skip this month” instead — nothing gets logged." },
-  { id:"help-debt-credit", title:"Track debt & credit",
-    body:"Go to Settings → Setup to add a loan or card: a name, a Type (Credit or Loan), and a current balance — no interest rate, no amortization, just a running total you correct by hand against your statement. Credit is revolving — a card or line of credit — and gets a choice of payoff method: “Balance in full” (the Month tab bill defaults to whatever the live balance is; checking it off zeroes it out) or “Set amount” (a fixed monthly payment you choose, same as a regular bill). A Loan can't be charged to and is always a set monthly payment, since there's no live balance to pay in full against. Either way, it shows up on the Month tab in its own “Credit & debt” section at the top — check it off to pay the default amount, or tap it to enter something different, including an extra or partial payment; editing the debt itself (name, type, payoff method, balance) is one tap away from there too. A “Balance in full” card that's already marked paid this month automatically reopens if a new charge comes in, showing whatever's newly owed — a “Set amount” debt or loan isn't affected by new charges at all, since its bill is a fixed target regardless of balance. Picking Credit as the Type is what makes it chargeable from bills or spending; a loan never gets that option. See total remaining and each debt's balance under Tools → Reports → Debts." },
-  { id:"help-backup", title:"Back up and move your data",
-    body:"Everything saves automatically on this device as you use it — there's nothing to press. To keep a safety copy, or move your data to a new phone, go to Settings → Back up & restore and choose a name and where to save the file — using the same name each time and choosing “Replace” if asked keeps you at one current copy instead of piling up old ones. On the new device, open Billfold and use Settings → Back up & restore → Restore to load it back in. Restoring replaces what's already on that device, so restore before making new edits there." },
   { id:"help-tabs-overview", title:"What each tab does",
-    body:"<b>Month</b> — see what's due this month and mark expenses paid.<br><b>Bills</b> — manage your full list of Bills, plus Funds for budgeted spending.<br><b>Log</b> — log everyday spending against a Fund or a Debt, or deposits and withdrawals toward your savings goals.<br><b>Tools</b> — open Reports to see where your money's going by category, or Calculator for quick math and investment projections.<br><b>Settings</b> — back up your data, set your monthly income, manage savings goals and debts, tweak preferences, and find these help pages." },
-  { id:"help-reminders", title:"Get a heads-up before bills are due",
-    body:"Go to Settings → Reminders and turn it on, then set how many days of lead time you want. Only bills with a due day set (Bills → edit a bill → Due day of month) are eligible — that's what tells Billfold when to notify you, so add one to anything you want a heads-up on. Each eligible bill also gets its own mute switch further down that page, for the ones you'd rather not be reminded about even with reminders on generally. Tapping a reminder notification opens straight to that bill's pay screen; some devices also offer a quick “Mark paid” action right from the notification. Reminders need the installed app — they're not available if you're using Billfold in a browser preview." },
-  { id:"help-hide-tabs", title:"Hide tabs you don't use",
-    body:"Go to Settings → Tabs &amp; appearance to remove Bills, Log, or Tools from the tab bar — Month and Settings can't be hidden. This only changes what shows up in the tab bar; nothing about the tab itself changes, and you're not locked out of it. To open a hidden tab, go back to that same Settings page and tap its name — it opens right up, no need to switch it back on first. The setting is saved with your data, so it carries over if you restore on a new device." },
+    body:"<p>Billfold has five tabs:</p>"
+      + '<ul class="help-list">'
+      + "<li><b>Month</b> — see what's due this month and mark expenses paid.</li>"
+      + "<li><b>Bills</b> — manage your full list of Bills, plus Funds for budgeted spending.</li>"
+      + "<li><b>Log</b> — log everyday spending against a Fund or a Debt, or deposits and withdrawals toward your savings goals.</li>"
+      + "<li><b>Tools</b> — open Reports to see where your money's going by category, or Calculator for quick math and investment projections.</li>"
+      + "<li><b>Settings</b> — back up your data, set your monthly income, manage savings goals and debts, tweak preferences, and find these help pages.</li>"
+      + "</ul>" },
+  { id:"help-setup-expenses", title:"Set up your expenses",
+    body:"<p>To add a bill or fund:</p>"
+      + '<ol class="help-list">'
+      + "<li>Open the <b>Bills</b> tab</li>"
+      + "<li>Tap the add button</li>"
+      + "<li>Choose a type</li>"
+      + "</ol>"
+      + '<p class="help-p"><b>Bill</b> — anything due on a schedule: rent, insurance, a subscription, a utility bill that changes month to month. Set a default amount; checking it off pays that amount, or tap it first to enter the real amount if a bill comes in different.</p>'
+      + '<p class="help-p"><b>Fund</b> — a monthly budget for spending that varies, like groceries or gas. This is the only type spending entries can pull from.</p>'
+      + '<p class="help-p">Every bill gets a category (which powers your reports) and an optional due day that unlocks a reminder toggle.</p>'
+      + '<p class="help-p"><b>Every payday</b> is a separate How-often option for a bill tied to your actual pay schedule instead of a calendar day — a car payment or transfer that goes out whenever you get paid. It follows Settings → Income directly, so Income needs to be set to Paycheck mode with Weekly or Every-2-weeks pay. There\u2019s no due day and no reminder for this option, since a paycheck-driven date drifts through the calendar rather than landing on a fixed day. Most months it\u2019s 2 payments, occasionally 3 when the cycle lines up that way.</p>' },
+  { id:"help-funds", title:"Budget for spending that varies",
+    body:"<p>To set up a fund:</p>"
+      + '<ol class="help-list">'
+      + "<li>Add a Fund from the Bills tab</li>"
+      + "<li>Set a monthly budget</li>"
+      + "<li>Pick that fund whenever you log spending, from Log → Spending</li>"
+      + "</ol>"
+      + '<p class="help-p">Billfold subtracts spending from the budget automatically, so you can see what\u2019s left. A toggle also offers to subtract it from that month\u2019s Available now — worth leaving on, so Available now reflects money you\u2019ve actually spent.</p>'
+      + '<p class="help-p">A fund can\u2019t go below $0. If an entry would push it past its budget, check <b>Unplanned</b> to log it anyway — it still counts in reports under that fund\u2019s category, it just won\u2019t drag the fund\u2019s remaining negative.</p>'
+      + '<p class="help-p"><b>Cash fund</b> — flip this on when adding a fund for money you\u2019ve already set aside separately, like physical cash or a separate account. Instead of a monthly budget, it tracks a running balance: it doesn\u2019t reset each month, and it doesn\u2019t reduce Available now, since that money was never part of it. Spending against it logs the same way as any fund. To correct the balance itself (say, after counting your wallet), use the fund\u2019s own <b>Adjust balance</b> action — it logs the difference as an adjustment rather than quietly overwriting the number.</p>' },
+  { id:"help-spending-needs-fund", title:"Why every spending entry needs a fund",
+    body:"<p>Every spending entry ties to a Fund. A couple of things are intentional here:</p>"
+      + '<ul class="help-list">'
+      + "<li>No free-text category — a fund\u2019s budget only means something if spending can\u2019t quietly slip past it under a different label.</li>"
+      + "<li>Bills aren\u2019t selectable from spending entries at all — they\u2019re tracked through their own pay screen instead.</li>"
+      + "<li>Anything beyond a fund\u2019s budget can still be logged — check <b>Unplanned</b> to record it without pushing the fund below $0.</li>"
+      + "</ul>" },
+  { id:"help-track-paid", title:"Track what's paid",
+    body:"<p>Open the <b>Month</b> tab — every bill due that month shows up on its own, pulled from your Bills list, in its own section at the top if it\u2019s a debt or credit payment.</p>"
+      + '<p class="help-p"><b>To mark something paid:</b></p>'
+      + '<ul class="help-list">'
+      + "<li>Tap the circle to mark it paid using the default amount — usually close enough, so it\u2019s a single tap.</li>"
+      + "<li>If the real amount is different, tap the bill itself first to enter it, then confirm — the difference adjusts Available now (or your card\u2019s balance).</li>"
+      + "</ul>"
+      + '<p class="help-p"><b>Once something\u2019s marked paid:</b></p>'
+      + '<ul class="help-list">'
+      + "<li>The amount locks — no more editing it in place.</li>"
+      + "<li><b>Mark unpaid</b> reverses it cleanly, undoing exactly what was charged, and brings the amount (plus \u201cPay with\u201d and Skip) back into play.</li>"
+      + "<li><b>Edit bill</b> is always available too, for changing the bill\u2019s own settings rather than this month\u2019s payment.</li>"
+      + "</ul>"
+      + '<p class="help-p"><b>Pay with</b> — if you have a debt or line of credit flagged as a payment option in Setup, any unpaid bill offers a choice:</p>'
+      + '<ul class="help-list">'
+      + "<li><b>Available Balance</b> — the default.</li>"
+      + "<li><b>Don\u2019t adjust a balance</b> — for anything already accounted for elsewhere.</li>"
+      + "<li>A card — adds to its balance instead of touching your cash.</li>"
+      + "</ul>"
+      + '<p class="help-p">Pick a card and check <b>Set as default for this bill</b> to have it pre-selected every month, instead of defaulting back to Available Balance — or set <b>Usually paid with</b> right on the expense itself (Bills → edit the expense) to do the same thing ahead of time.</p>'
+      + '<p class="help-p"><b>Skip</b> — an unpaid bill can also be skipped for the month: tap <b>Skip this month</b> from its pay screen. A skipped bill won\u2019t count toward what\u2019s due, and any reminder for it stays quiet.</p>'
+      + '<p class="help-p">Expenses linked to a savings goal work a little differently — see <i>Expenses that feed a savings goal</i>.</p>' },
   { id:"help-income", title:"Set up your income",
-    body:"Go to Settings → Setup. Enter net, take-home pay — after taxes and deductions — since that's what actually lands in your account and what makes the comparisons against spending accurate. “Flat amount” is the simplest option — just type a typical monthly figure. “Regular paycheck” instead asks for your paycheck amount, how often you're paid, and the date of your last paycheck — Billfold projects each month's income from that schedule rather than a flat average. This matters most for Weekly and Every 2 weeks: those schedules land an extra paycheck in some months (26 biweekly paychecks a year doesn't divide evenly into 12 months), and the projection reflects that instead of just multiplying one paycheck by a fixed number. Twice a month and Once a month don't have that quirk, so they're always a flat per-month amount. Either way, this is purely informational — it powers the income-vs-spending comparisons in Reports and on the Setup page itself, and never touches Available now or any bill math." }
+    body:"<p>To set up your income:</p>"
+      + '<ol class="help-list">'
+      + "<li>Go to Settings → Setup</li>"
+      + "<li>Enter your net, take-home pay — after taxes and deductions, since that\u2019s what actually lands in your account</li>"
+      + "<li>Choose how you\u2019re paid</li>"
+      + "</ol>"
+      + '<p class="help-p"><b>Flat amount</b> — the simplest option: just type a typical monthly figure.</p>'
+      + '<p class="help-p"><b>Regular paycheck</b> — asks for your paycheck amount, how often you\u2019re paid, and the date of your last paycheck. Billfold projects each month\u2019s income from that schedule rather than a flat average. This matters most for Weekly and Every 2 weeks: those schedules land an extra paycheck in some months (26 biweekly paychecks a year doesn\u2019t divide evenly into 12 months), and the projection reflects that. Twice a month and Once a month don\u2019t have that quirk, so they\u2019re always a flat per-month amount.</p>'
+      + '<p class="help-p">This is purely informational — it powers the income-vs-spending comparisons in Reports and on the Setup page, and never touches Available now or any bill math.</p>' },
+  { id:"help-savings-goal", title:"Save toward a goal",
+    body:"<p>To set up a savings goal:</p>"
+      + '<ol class="help-list">'
+      + "<li>Go to Settings → Setup (or add one the first time you open Billfold)</li>"
+      + "<li>Name the goal and set a target — up to 5 at a time</li>"
+      + "<li>Log deposits and withdrawals against it from Log → Savings</li>"
+      + "</ol>"
+      + '<p class="help-p">Each goal\u2019s card shows what\u2019s saved, what\u2019s left, and how close you are. A withdrawal can\u2019t take a goal below $0 — Billfold caps it and tells you the most you can actually withdraw.</p>'
+      + '<p class="help-p">Tap a goal anytime to edit its target or delete it — deleting keeps its logged deposits on record, grouped under \u201cOther.\u201d</p>' },
+  { id:"help-goal-linked-expense", title:"Expenses that feed a savings goal",
+    body:"<p>If you already treat a recurring transfer — a travel fund, an emergency fund — like a bill, link it to a goal:</p>"
+      + '<ol class="help-list">'
+      + "<li>Add or edit an expense</li>"
+      + "<li>Pick the goal from the \u201cLink to a savings goal\u201d field, right below Category</li>"
+      + "</ol>"
+      + '<p class="help-p">This is independent of Category, so the expense still gets a real, reportable category of its own — \u201cSavings,\u201d \u201cTravel,\u201d whatever fits. Picking a goal locks the expense\u2019s type to Bill, since a Fund can\u2019t feed one.</p>'
+      + '<p class="help-p"><b>Checking it off</b> marks it paid at the default amount and logs a matching deposit — tap the expense first to adjust the amount before confirming if you\u2019re contributing less (or more) than usual.</p>'
+      + '<p class="help-p"><b>Unpaying it</b> opens the pay screen to confirm first, since it deletes the deposit. Checking it back off is instant.</p>'
+      + '<p class="help-p">Didn\u2019t make the transfer this month? Tap <b>Skip this month</b> instead — nothing gets logged.</p>' },
+  { id:"help-debt-credit", title:"Track debt & credit",
+    body:"<p>To add a loan or card:</p>"
+      + '<ol class="help-list">'
+      + "<li>Go to Settings → Setup</li>"
+      + "<li>Give it a name</li>"
+      + "<li>Choose a Type: <b>Credit</b> or <b>Loan</b></li>"
+      + "<li>Enter the current balance — no interest rate, no amortization, just a running total you correct by hand against your statement</li>"
+      + "</ol>"
+      + '<p class="help-p"><b>Credit</b> is revolving — a card or line of credit — and gets a choice of payoff method:</p>'
+      + '<ul class="help-list">'
+      + "<li><b>Balance in full</b> — the Month tab bill defaults to whatever the live balance is; checking it off zeroes it out.</li>"
+      + "<li><b>Set amount</b> — a fixed monthly payment you choose, same as a regular bill.</li>"
+      + "</ul>"
+      + '<p class="help-p"><b>Loan</b> can\u2019t be charged to and is always a set monthly payment, since there\u2019s no live balance to pay in full against.</p>'
+      + '<p class="help-p">Either way, it shows up on the Month tab in its own \u201cCredit &amp; debt\u201d section at the top:</p>'
+      + '<ul class="help-list">'
+      + "<li>Check it off to pay the default amount.</li>"
+      + "<li>Tap it to enter something different — an extra or partial payment.</li>"
+      + "<li>Editing the debt itself (name, type, payoff method, balance) is one tap away from there too.</li>"
+      + "</ul>"
+      + '<p class="help-p">A \u201cBalance in full\u201d card that\u2019s already marked paid this month automatically reopens if a new charge comes in, showing whatever\u2019s newly owed. A \u201cSet amount\u201d debt or loan isn\u2019t affected by new charges at all, since its bill is a fixed target regardless of balance.</p>'
+      + '<p class="help-p">See total remaining and each debt\u2019s balance under Tools → Reports → Debts.</p>' },
+  { id:"help-reminders", title:"Get a heads-up before bills are due",
+    body:"<p>To turn on reminders:</p>"
+      + '<ol class="help-list">'
+      + "<li>Go to Settings → Reminders and turn it on</li>"
+      + "<li>Set how many days of lead time you want</li>"
+      + "<li>Add a due day to any bill you want a heads-up on (Bills → edit a bill → Due day of month) — only bills with a due day set are eligible</li>"
+      + "</ol>"
+      + '<p class="help-p">Each eligible bill also gets its own mute switch further down that Settings page, for the ones you\u2019d rather not be reminded about even with reminders on generally.</p>'
+      + '<p class="help-p">Tapping a reminder notification opens straight to that bill\u2019s pay screen; some devices also offer a quick \u201cMark paid\u201d action right from the notification.</p>'
+      + '<p class="help-p">Reminders need the installed app — they\u2019re not available if you\u2019re using Billfold in a browser preview.</p>' },
+  { id:"help-hide-tabs", title:"Hide tabs you don't use",
+    body:"<p>To hide a tab:</p>"
+      + '<ol class="help-list">'
+      + "<li>Go to Settings → Tabs &amp; appearance</li>"
+      + "<li>Turn off Bills, Log, or Tools — Month and Settings can\u2019t be hidden</li>"
+      + "</ol>"
+      + '<p class="help-p">This only changes what shows up in the tab bar; nothing about the tab itself changes, and you\u2019re not locked out of it.</p>'
+      + '<p class="help-p">To open a hidden tab, go back to that same Settings page and tap its name — it opens right up, no need to switch it back on first.</p>'
+      + '<p class="help-p">The setting is saved with your data, so it carries over if you restore on a new device.</p>' },
+  { id:"help-backup", title:"Back up and move your data",
+    body:"<p>Everything saves automatically on this device as you use it — there\u2019s nothing to press day to day. This is only for a safety copy, or a move to a new phone.</p>"
+      + '<p class="help-p"><b>To back up:</b></p>'
+      + '<ol class="help-list">'
+      + "<li>Go to Settings → Back up &amp; restore</li>"
+      + "<li>Choose a name and where to save the file</li>"
+      + "<li>Use the same name each time, and choose \u201cReplace\u201d if asked — that keeps you at one current copy instead of piling up old ones</li>"
+      + "</ol>"
+      + '<p class="help-p"><b>To move to a new phone:</b></p>'
+      + '<ol class="help-list">'
+      + "<li>Open Billfold on the new device</li>"
+      + "<li>Go to Settings → Back up &amp; restore → Restore</li>"
+      + "<li>Load in your backup file</li>"
+      + "</ol>"
+      + '<p class="help-p">Restoring replaces what\u2019s already on that device, so restore before making new edits there.</p>' },
+  { id:"help-install", title:"Install Billfold to your home screen",
+    body:"<p>\u201cInstalling\u201d the web version adds a proper icon to your home screen that opens full-screen, with no browser bar — the closest thing to an app without going through an app store. Your data doesn\u2019t move or duplicate; it\u2019s just a shortcut to the same browser storage Billfold was already using.</p>"
+      + '<p class="help-p"><b>On Android</b> (Chrome, Edge, and most other browsers): tap the Install button above — it\u2019s a real prompt from the browser itself. Not showing yet? Give the page a moment after loading, or look for \u201cInstall app\u201d in your browser\u2019s own menu (usually the \u22ee icon).</p>'
+      + '<p class="help-p"><b>On iPhone or iPad</b>, this has to be done by hand — Apple only allows it from Safari\u2019s own Share menu, not from any website directly:</p>'
+      + '<ol class="help-list">'
+      + "<li>Open Billfold in <b>Safari</b> — not Chrome, and not a browser tab inside another app like Gmail or Instagram</li>"
+      + "<li>Tap the <b>Share</b> icon in the toolbar (a square with an arrow pointing up)</li>"
+      + "<li>Scroll down and tap <b>Add to Home Screen</b></li>"
+      + "<li>Tap <b>Add</b> in the top corner</li>"
+      + "</ol>" }
 ];
 var helpSearchQuery = "";
 function setHelpSearch(input){
