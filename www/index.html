@@ -339,6 +339,7 @@ function dueInMonth(b,m){
   if(!b.active) return false;
   if(b.freq==="monthly") return true;
   if(b.freq==="semimonthly") return true;
+  if(b.freq==="payday") return paydayDatesInMonth(view.y, m).length>0;
   if(b.freq==="even") return m%2===0;
   if(b.freq==="odd") return m%2===1;
   if(b.freq==="yearly") return (b.month||1)===m;
@@ -401,6 +402,43 @@ function paychecksInMonth(y, m){
   while(d<=end){ count++; d.setDate(d.getDate()+interval); }
   return count;
 }
+function isoLocalDate(d){
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+}
+// A "Every payday" bill has no anchor date of its own — it reuses the paycheck schedule
+// directly, so it's always tied to however you actually get paid, with no reminders (a drifting
+// cycle has no fixed "day of month" to remind against) and no separate setup. Only meaningful
+// for Weekly/Every-2-weeks pay, since Monthly/Twice-a-month pay frequencies only ever track a
+// paycheck *count*, not specific dates. Mirrors paychecksInMonth's exact math, returning the
+// actual dates instead of just how many there are.
+function paydayDatesInMonth(y, m){
+  if(S.incomeMode!=="paycheck") return [];
+  var freq = S.payFrequency;
+  if(freq!=="weekly" && freq!=="biweekly") return [];
+  var last = new Date(S.lastPaycheckDate+"T00:00:00");
+  if(isNaN(last)) return [];
+  var interval = freq==="weekly" ? 7 : 14;
+  var start = new Date(y, m-1, 1);
+  var end = new Date(y, m, 0);
+  var d = new Date(last);
+  var diffDays = Math.round((start-d)/86400000);
+  var steps = Math.floor(diffDays/interval);
+  d.setDate(d.getDate()+steps*interval);
+  while(d<start) d.setDate(d.getDate()+interval);
+  var dates = [];
+  while(d<=end){ dates.push(new Date(d)); d.setDate(d.getDate()+interval); }
+  return dates;
+}
+// The one place that knows "how many occurrences, and which ones" a bill has in a given month —
+// everything else (rendering, totals, skip, projections) calls this instead of re-deriving the
+// freq-specific logic itself. Occurrence identifiers are either the small int slots bills have
+// always used (1, or 1&2 for semimonthly) or, for payday bills, the actual date string — since a
+// drifting cycle has no stable "1st/2nd" slot that means the same thing month to month.
+function billOccurrencesInMonth(b, y, m){
+  if(b.freq==="payday") return paydayDatesInMonth(y, m).map(isoLocalDate);
+  if(b.freq==="semimonthly") return [1, 2];
+  return [1];
+}
 // The one place anything in the app should read "income" from — decides flat vs. paycheck
 // projection so every caller (Reports, Setup) automatically benefits from either mode.
 function monthlyIncomeFor(y, m){
@@ -410,6 +448,7 @@ function monthlyIncomeFor(y, m){
 function freqText(b){
   if(b.freq==="yearly") return "Every "+MS[(b.month||1)-1];
   if(b.freq==="semimonthly") return "Twice a month"+((b.dueDay&&b.dueDay2)?" (days "+b.dueDay+" & "+b.dueDay2+")":"");
+  if(b.freq==="payday") return "Every payday";
   return {monthly:"Monthly",even:"Even months",odd:"Odd months"}[b.freq]||"Monthly";
 }
 function catColor(cat){
@@ -1125,19 +1164,23 @@ function openDebtPay(debtId){
   modal(esc(debt.name),
     '<p class="muted" style="font-size:.875rem;margin-bottom:1rem">'+usd(num(debt.balance)+(isPaid?paidAmt:0))+' total balance owed</p>'
     + '<label class="flabel">Amount</label>'
-    + '<div style="display:flex;gap:.5rem">'
-    + '<div class="money" style="flex:1;width:auto;border-radius:.75rem;padding:0 .75rem">'
-    + '<span>$</span><input id="debtPayInput" class="tnum" inputmode="decimal" value="'+full+'" style="padding:.6rem 0 .6rem .25rem;font-size:1rem" onkeydown="if(event.key===\'Enter\')debtPaySave()">'+calcBtn()+'</div>'
-    + '<button class="btn btn-ink" onclick="debtPaySave()">'+(isPaid?"Save":"Mark paid")+'</button></div>'
-    + methodBlock
-    + '<p class="muted" style="font-size:.75rem;margin-top:.5rem">'
-    + (isPaid ? "Marked paid. Edit the amount and save to correct it — the difference adjusts Available now (or wherever it's paid from) and the balance together."
-               : (debt.payoffMethod==="full" ? "Defaults to the full balance. Enter a different amount to pay less (or more), then confirm."
-                                              : "Defaults to the monthly payment set on this debt. Enter a different amount for an extra or partial payment."))
-    + '</p>'
-    + (isPaid ? '<button class="btn btn-ghost" style="width:100%;margin-top:.5rem" onclick="debtPayUnpay()">Mark unpaid</button>' : '')
-    + '<div class="divider" style="margin:1rem 0"></div>'
-    + '<button class="btn btn-ghost" style="width:100%" onclick="closeModal();openDebtForm(\''+debtId+'\')">Edit debt details</button>');
+    + (isPaid
+        ? ('<div class="field" style="display:flex;align-items:center;font-weight:600" aria-label="Amount, view only">'+usd(full)+'</div>'
+          + '<p class="muted" style="font-size:.75rem;margin-top:.5rem">Marked paid. Mark it unpaid to change the amount or how it was paid.</p>'
+          + '<div class="grid2" style="margin-top:.75rem">'
+          + '<button class="btn btn-ghost" onclick="debtPayUnpay()">Mark unpaid</button>'
+          + '<button class="btn btn-ghost" onclick="closeModal();openDebtForm(\''+debtId+'\')">Edit debt details</button></div>')
+        : ('<div style="display:flex;gap:.5rem">'
+          + '<div class="money" style="flex:1;width:auto;border-radius:.75rem;padding:0 .75rem">'
+          + '<span>$</span><input id="debtPayInput" class="tnum" inputmode="decimal" value="'+full+'" style="padding:.6rem 0 .6rem .25rem;font-size:1rem" onkeydown="if(event.key===\'Enter\')debtPaySave()">'+calcBtn()+'</div>'
+          + '<button class="btn btn-ink" onclick="debtPaySave()">Mark paid</button></div>'
+          + methodBlock
+          + '<p class="muted" style="font-size:.75rem;margin-top:.5rem">'
+          + (debt.payoffMethod==="full" ? "Defaults to the full balance. Enter a different amount to pay less (or more), then confirm."
+                                         : "Defaults to the monthly payment set on this debt. Enter a different amount for an extra or partial payment.")
+          + '</p>'
+          + '<div class="divider" style="margin:1rem 0"></div>'
+          + '<button class="btn btn-ghost" style="width:100%" onclick="closeModal();openDebtForm(\''+debtId+'\')">Edit debt details</button>')));
   var inp = document.getElementById("debtPayInput");
   if(inp){ inp.focus(); inp.select(); }
 }
@@ -1196,7 +1239,7 @@ function debtCreditRowHtml(d){
 /* A "semimonthly" bill has two independent due dates within the same month, each tracked
    separately. Occurrence 1 always uses the plain billId key (so every existing bill's saved
    "left" data keeps working untouched); occurrence 2 uses a suffixed key. */
-function leftKey(billId, occ){ return occ===2 ? billId+":2" : billId; }
+function leftKey(billId, occ){ return (occ===1 || occ==null) ? billId : billId+":"+occ; }
 function leftOf(b, data, occ){
   var d = data || md();
   var paidAmt = varPaidAmount(d, b.id, occ);
@@ -1210,8 +1253,7 @@ function restOfYear(){
     billsList().forEach(function(b){
       if(!dueInMonth(b,m)) return;
       if(isSkipped(b, view.y, m)) return;
-      sum += leftOf(b,data,1);
-      if(b.freq==="semimonthly") sum += leftOf(b,data,2);
+      billOccurrencesInMonth(b, view.y, m).forEach(function(occ){ sum += leftOf(b,data,occ); });
     });
     fundsList().forEach(function(f){
       if(!f.active) return;
@@ -1361,8 +1403,8 @@ function setMonthSort(key){ monthSort = key; closeModal(); render(); }
 // bills are never treated as "paid" here, so Hide Paid doesn't also hide skipped ones.
 function isBillFullyPaid(b, data){
   if(isSkipped(b, view.y, view.m)) return false;
-  if(b.freq==="semimonthly") return leftOf(b,data,1)===0 && leftOf(b,data,2)===0;
-  return leftOf(b,data,1)===0;
+  var occs = billOccurrencesInMonth(b, view.y, view.m);
+  return occs.length>0 && occs.every(function(occ){ return leftOf(b,data,occ)===0; });
 }
 function monthVisibleBills(bills, data){
   var list = bills.slice();
@@ -1403,14 +1445,11 @@ function monthScreen(){
   var debtItems = visibleDebtCreditItems();
   var totalDue=0, stillDue=0, paidCount=0;
   countable.forEach(function(b){
-    if(b.freq==="semimonthly"){
-      var l1 = leftOf(b,data,1), l2 = leftOf(b,data,2);
-      totalDue += fullAmountFor(b,data,1) + fullAmountFor(b,data,2); stillDue += l1+l2;
-      if(l1===0 && l2===0) paidCount++;
-    } else {
-      var l = leftOf(b,data); totalDue += fullAmountFor(b,data,1); stillDue += l;
-      if(l===0) paidCount++;
-    }
+    var occs = billOccurrencesInMonth(b, view.y, view.m);
+    var full = 0, left = 0;
+    occs.forEach(function(occ){ full += fullAmountFor(b,data,occ); left += leftOf(b,data,occ); });
+    totalDue += full; stillDue += left;
+    if(occs.length>0 && left===0) paidCount++;
   });
   debtItems.forEach(function(d){
     totalDue += debtDueAmount(d); stillDue += debtLeftOf(d, view.y, view.m);
@@ -1444,8 +1483,7 @@ function monthScreen(){
     + '<div class="money" style="width:auto;background:var(--card);border:1px solid var(--line);padding:.35rem .7rem;border-radius:.6rem">'
     + '<span style="font-size:1rem;font-weight:700;color:var(--pine)">$</span>'
     + '<input class="tnum" inputmode="decimal" value="'+num(data.balance)+'" onchange="patchMonthField(\'balance\', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()" '
-    + 'style="font-weight:800;font-size:1.4rem;letter-spacing:-0.02em;color:var(--pine);text-align:right;background:transparent;border:none;padding:0;width:auto;max-width:130px">'
-    + '</div></div>'
+    + 'style="font-weight:800;font-size:1.4rem;letter-spacing:-0.02em;color:var(--pine);text-align:right;background:transparent;border:none;padding:0;width:auto;max-width:130px">'+calcBtn()+'</div></div>'
     + '<div class="row" style="margin-top:.6rem"><span class="lbl">Net remaining after bills &amp; funds</span>'
     + '<span class="tnum" style="font-weight:700;color:'+(afterAll<0?"var(--red)":"var(--pine)")+'">'+usd(afterAll)+'</span></div>'
     + '<button style="all:unset;cursor:pointer;display:flex;align-items:center;gap:.3rem;margin-top:.7rem;color:var(--sub);font-size:.75rem;font-weight:600" onclick="moneyMathOpen=!moneyMathOpen;render()">'
@@ -1526,7 +1564,7 @@ function monthBillRow(b, data, occ, subtitle){
     + '<div><div class="bill-name'+(paid?" done":"")+'">'+esc(b.name)+(linked?' <i class="row-goal" aria-hidden="true" style="font-size:.7rem;color:var(--pine)" title="Linked to a savings goal">'+icon("target",11)+'</i>':'')+'</div>'
     + '<div class="bill-cat">'+(monthSort==="cat_group"
         ? (subtitle||'')
-        : '<span class="cat-dot" style="background:'+catColor(b.category)+'"></span>'+esc(b.category)+(subtitle?' · '+subtitle:''))+'</div></div>'
+        : '<span class="cat-dot" style="background:'+catColor(b.category)+'"></span>'+esc(b.category)+(subtitle?' '+subtitle:''))+'</div></div>'
     + '<div style="display:flex;align-items:center;gap:.5rem">'
     + '<div class="bill-amt"><div class="due tnum">'+usd(full)+'</div>'
     + '<div class="status tnum" style="color:'+statusColor+'">'+statusText+'</div></div>'
@@ -1536,10 +1574,10 @@ function monthBillRow(b, data, occ, subtitle){
     + '</div></li>';
 }
 function monthBillRows(b, data){
-  if(b.freq!=="semimonthly") return [monthBillRow(b, data, 1, null)];
-  var sub1 = b.dueDay ? "1st payment, due day "+b.dueDay : "1st payment";
-  var sub2 = b.dueDay2 ? "2nd payment, due day "+b.dueDay2 : "2nd payment";
-  return [monthBillRow(b, data, 1, sub1), monthBillRow(b, data, 2, sub2)];
+  var occs = billOccurrencesInMonth(b, view.y, view.m);
+  if(occs.length===0) return [];
+  if(occs.length===1) return [monthBillRow(b, data, occs[0], null)];
+  return occs.map(function(occ, i){ return monthBillRow(b, data, occ, "("+(i+1)+"/"+occs.length+" payments)"); });
 }
 function moneyRow(label, value, handler){
   var v = num(value);
@@ -3101,7 +3139,7 @@ function openJournalForm(id){
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
     + '<input id="jfAmount" class="tnum" inputmode="decimal" value="'+(e?num(e.amount):"")+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
     + '</div>'
-    + '<div class="fgroup"><label class="flabel">Date</label>'
+    + '<div class="fgroup" style="margin-top:.9rem"><label class="flabel">Date</label>'
     + '<input id="jfDate" type="date" class="field" value="'+esc(date)+'" oninput="jfMethodChanged();jfFundChanged()"></div>'
     + '<div class="fgroup"><label class="flabel">Fund</label>'
     + '<select id="jfFund" class="field" onchange="jfFundChanged()">'+fundOpts+'</select>'
@@ -3926,7 +3964,10 @@ var UPDATE_LOG = [
       "The Android back button now returns to the Month tab from any other tab before it'll exit the app, instead of exiting from wherever you happen to be.",
       "Trimmed down what a Month-tab row shows at a glance: dropped the \"est.\" tag (it had started showing on every bill, not just ones that actually vary) and the \"→ goal\" text tag in favor of a small icon, with a chevron added consistently across every row so it's clearer the whole row is tappable, not just the checkbox.",
       "Fixed a real bug: restoring a backup only ran a handful of the app's data migrations, not all of them — anything saved in an older format (a Fixed-type bill, older paid-status tracking) could come back missing entirely or showing the wrong paid status. Restoring now runs the exact same setup a normal app load does.",
-      "Fixed a bug where deleting a goal's auto-logged deposit from the Savings tab didn't actually mark its linked bill unpaid again, a leftover from before goal-linked bills used the same paid-tracking as every other bill."
+      "Fixed a bug where deleting a goal's auto-logged deposit from the Savings tab didn't actually mark its linked bill unpaid again, a leftover from before goal-linked bills used the same paid-tracking as every other bill.",
+      "Bills can now be set to \"Every payday\" — tied directly to your paycheck schedule in Settings → Income instead of a calendar day, for anything that actually goes out whenever you get paid. No due day, no reminders (a paycheck-driven date drifts through the calendar, so there's no fixed day to remind against); most months it's 2 payments, occasionally 3 when the cycle lines up that way, shown right on the Month tab as \"(1/2 payments)\", \"(2/3 payments)\", and so on. Semimonthly bills get the same shorter subtitle now too, with the specific due days moved into the edit form alongside the reminder toggle instead of cluttering the list.",
+      "Once a bill is marked paid on the Month tab, the amount, \"Pay with,\" and \"Skip this month\" all lock — mark it unpaid to get them back, or jump straight to \"Edit bill\" for changing the bill's own settings instead of that month's payment. Applies to debts too.",
+      "Combined the 1st/2nd due day fields for a semimonthly bill into a single row, and trimmed a couple of the longer field descriptions — the expense form was getting long."
     ]
   },
   {
@@ -4035,7 +4076,7 @@ function incomeSectionHtml(){
       + PAY_FREQUENCIES.map(function(f){ return '<option value="'+f[0]+'"'+(S.payFrequency===f[0]?" selected":"")+'>'+f[1]+'</option>'; }).join("")
       + '</select></div>'
       + '</div>'
-      + '<div class="fgroup"><label class="flabel">Last paycheck date</label>'
+      + '<div class="fgroup" style="margin-top:.9rem"><label class="flabel">Last paycheck date</label>'
       + '<input id="incLastDate" type="date" class="field" value="'+esc(S.lastPaycheckDate||"")+'" onchange="saveIncomeFields()"></div>'
       + '<p class="muted" style="font-size:.72rem;margin:.35rem 0 .9rem">Use what actually lands in your account, after taxes and deductions — that\'s what makes the comparisons accurate. '
       + (num(S.paycheckAmount)>0 && S.lastPaycheckDate
@@ -4249,17 +4290,17 @@ function dtDelete(){
 }
 var HELP_ITEMS = [
   { id:"help-setup-expenses", title:"Set up your expenses",
-    body:"Head to the Bills tab and tap the add button. Pick a type: Bill for anything due on a schedule — rent, insurance, a subscription, a utility bill that changes month to month. Set a default amount now; checking it off pays that amount, or tap it first to enter the real amount before confirming if a bill comes in different. Fund for a monthly budget on spending that varies (groceries, gas) — this is the only type spending entries can pull from. Bills get a category (which powers your reports) and an optional due day that unlocks a per-expense reminder toggle." },
+    body:"Head to the Bills tab and tap the add button. Pick a type: Bill for anything due on a schedule — rent, insurance, a subscription, a utility bill that changes month to month. Set a default amount now; checking it off pays that amount, or tap it first to enter the real amount before confirming if a bill comes in different. Fund for a monthly budget on spending that varies (groceries, gas) — this is the only type spending entries can pull from. Bills get a category (which powers your reports) and an optional due day that unlocks a per-expense reminder toggle. \u201cEvery payday\u201d is a separate How-often option for a bill tied to your actual pay schedule instead of a calendar day — a car payment or transfer that goes out whenever you get paid. It follows Settings → Income directly, so it needs Income set to Paycheck mode with Weekly or Every-2-weeks pay; there's no due day to set and no reminder, since a paycheck-driven date drifts through the calendar rather than landing on a fixed day. Most months it's 2 payments, occasionally 3 when the cycle lines up that way — the Month tab shows however many actually fall in a given month." },
   { id:"help-funds", title:"Budget for spending that varies",
     body:"Add a Fund from the Bills tab and set a monthly budget. When you log spending in Log → Spending, pick that fund, and Billfold does the subtraction for you so you can see what's left — a toggle also offers to subtract it from that month's Available now, worth leaving on so Available now reflects money you've actually spent. A fund can't go below $0: if an entry would push it past its budget, check “Unplanned” to log it anyway — it still counts in reports under that fund's category, it just won't drag the fund's remaining negative. Flip on “Cash fund” when adding one for money you've already set aside separately — physical cash, a separate account. A cash fund tracks a running balance instead of a monthly budget: it doesn't reset each month, and it doesn't reduce Available now, since that money was never part of it to begin with. Spending against it logs the same way as any fund; correcting the balance itself (say, after counting your wallet) is a separate “Adjust balance” action from the fund's edit screen, which logs the difference as an adjustment rather than quietly overwriting the number." },
   { id:"help-spending-needs-fund", title:"Why every spending entry needs a fund",
     body:"Every spending entry ties to a Fund, with an “Unplanned” checkbox for anything beyond that fund's budget. There's no free-text category here on purpose — a fund's budget limit only means something if spending can't quietly slip past it under a different label. Bills aren't selectable from spending entries at all; they're tracked through their own pay screen instead." },
   { id:"help-track-paid", title:"Track what's paid",
-    body:"Open the Month tab. Every bill due that month shows up on its own, pulled straight from your Bills list, in its own top section if it's a debt or credit payment. Tapping the circle marks it paid using the default amount — that's usually close enough, so checking it off is a single tap either way. If it isn't close enough, tap the bill itself instead to enter the real amount before (or after) confirming it; the difference adjusts Available now (or your card's balance — see below). “Mark unpaid” undoes it cleanly, reversing exactly what was charged, in a single tap. If you have a debt or line of credit flagged as a payment option in Setup, a “Pay with” choice shows up on every bill — pick Available Balance, “Don't adjust a balance” if it's already accounted for elsewhere, or a card, and the amount routes there instead: a card charge adds to its balance rather than touching your cash. Pick a card and check “Set as default for this bill” to have it pre-selected every month going forward, instead of defaulting back to Available Balance each time — or set “Usually paid with” right on the expense itself, from Bills → edit the expense, which does the same thing without waiting until you're paying it. Bills can also be skipped for the month — tap “Skip this month” from its pay screen; a skipped bill won't count toward what's due, and any reminder for it stays quiet. Expenses linked to a savings goal work a little differently — see “Expenses that feed a savings goal” below." },
+    body:"Open the Month tab. Every bill due that month shows up on its own, pulled straight from your Bills list, in its own top section if it's a debt or credit payment. Tapping the circle marks it paid using the default amount — that's usually close enough, so checking it off is a single tap either way. If it isn't close enough, tap the bill itself first to enter the real amount before confirming; the difference adjusts Available now (or your card's balance — see below). \u201cEdit bill\u201d is right there on the pay screen either way, for changing the bill's own settings rather than this month's payment. Once something's marked paid, the amount is locked — “Mark unpaid” undoes it cleanly, reversing exactly what was charged, and brings the amount (and “Pay with,” and Skip) back into play so you can redo it correctly. If you have a debt or line of credit flagged as a payment option in Setup, a “Pay with” choice shows up on any unpaid bill — pick Available Balance, “Don't adjust a balance” if it's already accounted for elsewhere, or a card, and the amount routes there instead: a card charge adds to its balance rather than touching your cash. Pick a card and check “Set as default for this bill” to have it pre-selected every month going forward, instead of defaulting back to Available Balance each time — or set “Usually paid with” right on the expense itself, from Bills → edit the expense, which does the same thing without waiting until you're paying it. An unpaid bill can also be skipped for the month — tap “Skip this month” from its pay screen; a skipped bill won't count toward what's due, and any reminder for it stays quiet. Expenses linked to a savings goal work a little differently — see “Expenses that feed a savings goal” below." },
   { id:"help-savings-goal", title:"Save toward a goal",
     body:"Go to Settings → Setup (or add one the first time you open Billfold) to name a goal and set a target — you can keep up to 5 at a time. Log deposits and withdrawals against a goal from Log → Savings; each goal's card shows what's saved, what's left, and how close you are. A withdrawal can't take a goal below $0 — Billfold will cap it and tell you the most you can actually withdraw. Tap a goal any time to edit its target or delete it — deleting keeps its logged deposits on record, grouped under “Other.”" },
   { id:"help-goal-linked-expense", title:"Expenses that feed a savings goal",
-    body:"If you already treat a recurring transfer — a travel fund, an emergency fund — like a bill, link it to a goal when adding or editing an expense: pick the goal from the “Link to a savings goal” field, right below Category. It's independent of Category, so the expense still gets a real, reportable category of its own — “Savings,” “Travel,” whatever fits — while the goal link is a separate on/off choice. Picking a goal locks the expense's type to Bill, since a Fund can't feed a goal. Checking it off marks it paid at the default amount and logs a matching deposit; tap the expense first to adjust the amount before confirming if you're contributing less (or more) than usual — editing the amount afterward updates that deposit to match. Unpaying it opens the pay screen to confirm first, since it deletes the deposit — checking it back off, on the other hand, is instant. Didn't make the transfer this month? Tap “Skip this month” instead — nothing gets logged." },
+    body:"If you already treat a recurring transfer — a travel fund, an emergency fund — like a bill, link it to a goal when adding or editing an expense: pick the goal from the “Link to a savings goal” field, right below Category. It's independent of Category, so the expense still gets a real, reportable category of its own — “Savings,” “Travel,” whatever fits — while the goal link is a separate on/off choice. Picking a goal locks the expense's type to Bill, since a Fund can't feed a goal. Checking it off marks it paid at the default amount and logs a matching deposit; tap the expense first to adjust the amount before confirming if you're contributing less (or more) than usual. Unpaying it opens the pay screen to confirm first, since it deletes the deposit — checking it back off, on the other hand, is instant. Didn't make the transfer this month? Tap “Skip this month” instead — nothing gets logged." },
   { id:"help-debt-credit", title:"Track debt & credit",
     body:"Go to Settings → Setup to add a loan or card: a name, a Type (Credit or Loan), and a current balance — no interest rate, no amortization, just a running total you correct by hand against your statement. Credit is revolving — a card or line of credit — and gets a choice of payoff method: “Balance in full” (the Month tab bill defaults to whatever the live balance is; checking it off zeroes it out) or “Set amount” (a fixed monthly payment you choose, same as a regular bill). A Loan can't be charged to and is always a set monthly payment, since there's no live balance to pay in full against. Either way, it shows up on the Month tab in its own “Credit & debt” section at the top — check it off to pay the default amount, or tap it to enter something different, including an extra or partial payment; editing the debt itself (name, type, payoff method, balance) is one tap away from there too. A “Balance in full” card that's already marked paid this month automatically reopens if a new charge comes in, showing whatever's newly owed — a “Set amount” debt or loan isn't affected by new charges at all, since its bill is a fixed target regardless of balance. Picking Credit as the Type is what makes it chargeable from bills or spending; a loan never gets that option. See total remaining and each debt's balance under Tools → Reports → Debts." },
   { id:"help-backup", title:"Back up and move your data",
@@ -4283,7 +4324,7 @@ function setHelpSearch(input){
 }
 function clearHelpSearch(){ helpSearchQuery = ""; render(); }
 var GLOSSARY_ITEMS = [
-  { term:"Bill", def:"Due on a schedule — rent, a subscription, insurance, a utility bill. Checking it off marks it paid using the default amount; tap it first to enter the real amount before confirming if it differs. No partial payments; it's either unpaid (showing the default) or paid (showing what you confirmed), and you can correct that amount anytime while it's marked paid.", linkLabel:"Add a bill", onclick:"billsSubMode='bills';go('bills');openExpenseForm(null,'variable')" },
+  { term:"Bill", def:"Due on a schedule — rent, a subscription, insurance, a utility bill. Checking it off marks it paid using the default amount; tap it first to enter the real amount before confirming if it differs. No partial payments; it's either unpaid (showing the default) or paid (showing what you confirmed). The amount locks once paid — mark it unpaid first if you need to correct it.", linkLabel:"Add a bill", onclick:"billsSubMode='bills';go('bills');openExpenseForm(null,'variable')" },
   { term:"Fund", def:"A monthly budget for a category of spending that varies, like groceries or gas — the only thing spending entries can pull from. A Cash fund (see below) works differently.", linkLabel:"Set up a fund", onclick:"billsSubMode='funds';go('bills');openExpenseForm(null,'fund')" },
   { term:"Spending entry", def:"A single day-to-day expense logged in your ledger, always tied to a Fund — check “Unplanned” if it goes beyond that fund's budget.", linkLabel:"Log a spending entry", onclick:"trackMode='journal';go('track');openJournalForm(null)" },
   { term:"Savings entry", def:"A deposit or withdrawal logged against one of your savings goals.", linkLabel:"Log a savings entry", onclick:"trackMode='savings';go('track');openSavingsEntryForm(null)" },
@@ -4404,7 +4445,9 @@ function openPay(id, occ){
   var full = fullAmountFor(b, data, payOcc);
   var l = leftOf(b, data, payOcc);
   var isPaid = !skipped && l===0;
-  var occNote = b.freq==="semimonthly" ? (payOcc===2 ? " · 2nd payment" : " · 1st payment") : "";
+  var billOccs = billOccurrencesInMonth(b, y, m);
+  var occIdx = billOccs.indexOf(payOcc);
+  var occNote = billOccs.length>1 && occIdx>=0 ? " · payment "+(occIdx+1)+" of "+billOccs.length : "";
   var topBlock = '<p class="muted" style="font-size:.875rem;margin-bottom:1rem">'+usd(full)+' · '+freqText(b)+occNote+'</p>';
 
   // Payment-method choice: only once there's a credit option to actually choose between —
@@ -4429,27 +4472,32 @@ function openPay(id, occ){
   var goal = b.linkedGoalId ? S.savingsGoals.filter(function(g){ return g.id===b.linkedGoalId; })[0] : null;
   var goalNote = !b.linkedGoalId ? ""
     : goal ? (isPaid
-        ? 'Editing the amount above and saving also updates the matching deposit to <b style="color:var(--ink)">'+esc(goal.name)+'</b>.'
+        ? 'Logged a matching deposit to <b style="color:var(--ink)">'+esc(goal.name)+'</b> — unpaying removes it.'
         : 'Confirming this also logs a matching deposit to <b style="color:var(--ink)">'+esc(goal.name)+'</b>.')
-      : 'The savings goal this was linked to no longer exists, so this behaves like a normal bill — no deposit will be logged.';
+      : (isPaid ? '' : 'The savings goal this was linked to no longer exists, so this behaves like a normal bill — no deposit will be logged.');
   modal(esc(b.name),
     topBlock
     + (skipped ? '<p style="font-size:.85rem;font-weight:600;margin-bottom:1rem">Skipped this month — nothing due.</p>' : '')
     + '<label class="flabel">Amount</label>'
-    + '<div style="display:flex;gap:.5rem">'
-    + '<div class="money" style="flex:1;width:auto;border-radius:.75rem;padding:0 .75rem">'
-    + '<span>$</span><input id="payInput" class="tnum" inputmode="decimal" value="'+full+'" '+(skipped?"disabled":"")+' '
-    + 'style="padding:.6rem 0 .6rem .25rem;font-size:1rem" onkeydown="if(event.key===\'Enter\')varPaySave()">'+calcBtn()+'</div>'
-    + '<button class="btn btn-ink" onclick="varPaySave()"'+(skipped?' disabled':'')+'>'+(isPaid?"Save":"Mark paid")+'</button></div>'
-    + methodBlock
-    + '<p class="muted" style="font-size:.75rem;margin-top:.5rem">'
-    + (isPaid ? "Marked paid. Edit the amount and save to correct it — the difference adjusts Available now."
-              : "Defaults to "+usd(b.estimate)+". Enter the real amount if it's different, then confirm — that\u2019s what moves Available now.")
-    + (goalNote ? " "+goalNote : "")
-    + '</p>'
-    + (isPaid ? '<button id="varUnpayBtn" class="btn btn-ghost" style="width:100%;margin-top:.5rem" onclick="varPayClear()">Mark unpaid'+(b.linkedGoalId&&goal?" (deletes the deposit)":"")+'</button>' : '')
-    + '<div class="divider" style="margin:1rem 0"></div>'
-    + '<button class="btn btn-ghost" style="width:100%" onclick="billSkipToggle()">'+(skipped?"Clear skip — due again this month":"Skip this month")+'</button>');
+    + (isPaid
+        ? ('<div class="field" style="display:flex;align-items:center;font-weight:600" aria-label="Amount, view only">'+usd(full)+'</div>'
+          + '<p class="muted" style="font-size:.75rem;margin-top:.5rem">Marked paid. Mark it unpaid to change the amount or how it was paid.'
+            + (goalNote ? " "+goalNote : "") + '</p>'
+          + '<div class="grid2" style="margin-top:.75rem">'
+          + '<button id="varUnpayBtn" class="btn btn-ghost" onclick="varPayClear()">Mark unpaid</button>'
+          + '<button class="btn btn-ghost" onclick="closeModal();openExpenseForm(\''+b.id+'\')">Edit bill</button></div>')
+        : ('<div style="display:flex;gap:.5rem">'
+          + '<div class="money" style="flex:1;width:auto;border-radius:.75rem;padding:0 .75rem">'
+          + '<span>$</span><input id="payInput" class="tnum" inputmode="decimal" value="'+full+'" '+(skipped?"disabled":"")+' '
+          + 'style="padding:.6rem 0 .6rem .25rem;font-size:1rem" onkeydown="if(event.key===\'Enter\')varPaySave()">'+calcBtn()+'</div>'
+          + '<button class="btn btn-ink" onclick="varPaySave()"'+(skipped?' disabled':'')+'>Mark paid</button></div>'
+          + methodBlock
+          + '<p class="muted" style="font-size:.75rem;margin-top:.5rem">Defaults to '+usd(b.estimate)+'. Enter the real amount if it\'s different, then confirm — that\u2019s what moves Available now.'
+            + (goalNote ? " "+goalNote : "") + '</p>'
+          + '<div class="divider" style="margin:1rem 0"></div>'
+          + '<div class="grid2">'
+          + '<button class="btn btn-ghost" onclick="billSkipToggle()">'+(skipped?"Clear skip — due again":"Skip this month")+'</button>'
+          + '<button class="btn btn-ghost" onclick="closeModal();openExpenseForm(\''+b.id+'\')">Edit bill</button></div>')));
   var vinp = document.getElementById("payInput");
   if(vinp && !skipped){ vinp.focus(); vinp.select(); }
 }
@@ -4518,13 +4566,17 @@ function billSkipToggle(){
     persist(); closeModal(); render();
     if(S.remindersOn) scheduleRemindersDebounced();
   } else {
+    var occs = billOccurrencesInMonth(b, y, m);
     if(b.linkedGoalId){
-      var entry = goalDepositEntry(b.id, y, m, payOcc);
-      if(entry) deleteGoalDeposit(b.id, y, m, payOcc);
+      occs.forEach(function(occ){
+        var entry = goalDepositEntry(b.id, y, m, occ);
+        if(entry) deleteGoalDeposit(b.id, y, m, occ);
+      });
     }
     b.skipMonths.push(key);
-    // Clear the paid state, reversing any auto-reduce-balance adjustment.
-    unmarkVariablePaid(b.id, payOcc);
+    // Clear the paid state for every occurrence this month, reversing any auto-reduce-balance
+    // adjustment — not just the one whose modal happened to be open.
+    occs.forEach(function(occ){ unmarkVariablePaid(b.id, occ); });
     closeModal();
     showBalanceWarning();
   }
@@ -4548,12 +4600,24 @@ function expActiveBlockHtml(type, isActive, defaultPayVal, isDebtLinked, isGoalL
       + paymentOptions().map(function(o){ return '<option value="'+esc(o.id)+'"'+(o.id===defaultPayVal?" selected":"")+'>'+esc(o.name)+'</option>'; }).join("")
       + '</select></div>'
       + '</div>'
-      + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Paused expenses are kept but don\'t count anywhere. "Usually paid with" pre-selects this on the pay screen every month, instead of Available Balance. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-track-paid\')">More info</button></p>';
+      + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Paused expenses don\'t count anywhere. Sets the default "Pay with" for this bill each month. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-track-paid\')">More info</button></p>';
   }
   return '<div class="fgroup"><label class="flabel">Status</label><button class="field row" style="cursor:pointer" onclick="expActiveToggle(this)">'
     + '<span id="expActiveLbl" style="font-size:.875rem;font-weight:500">Active'+badge+'</span>'
     + '<span id="expActive" class="toggle'+(isActive?" on":"")+'" data-on="'+(isActive?1:0)+'"><span class="knob"></span></span></button>'
     + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Paused expenses are kept but don\'t count anywhere.</p></div>';
+}
+// Every-payday bills have no due day and no reminders — they reuse the paycheck schedule
+// directly, so there's nothing to set up beyond picking this option, as long as Income is
+// actually in Paycheck mode with Weekly or Every-2-weeks pay. Warn plainly if it isn't, since
+// otherwise the bill would just silently never show up on the Month tab.
+function expPaydayNoteHtml(){
+  var ok = S.incomeMode==="paycheck" && (S.payFrequency==="weekly"||S.payFrequency==="biweekly") && S.lastPaycheckDate;
+  return '<p class="muted" style="font-size:.72rem">'
+    + (ok
+        ? "Follows your paycheck schedule from Settings → Income — no due day, no reminders needed."
+        : '<b style="color:var(--amber)">Set Income to Paycheck mode with Weekly or Every-2-weeks pay in Settings first</b> — until then this bill won\'t show up on the Month tab.')
+    + ' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-setup-expenses\')">More info</button></p>';
 }
 function expTypeHelpText(type){
   return type==="fund" ? "A monthly budget for spending that varies — groceries, gas. This is the only thing spending entries can pull from."
@@ -4630,15 +4694,19 @@ function openExpenseForm(id, defaultType, presetGoalId){
     + '<option value="even"'+(freq==="even"?" selected":"")+'>Even months (Feb, Apr, Jun…)</option>'
     + '<option value="odd"'+(freq==="odd"?" selected":"")+'>Odd months (Jan, Mar, May…)</option>'
     + '<option value="yearly"'+(freq==="yearly"?" selected":"")+'>Once a year</option>'
-    + '<option value="semimonthly"'+(freq==="semimonthly"?" selected":"")+'>Twice a month (custom days)</option></select>'
+    + '<option value="semimonthly"'+(freq==="semimonthly"?" selected":"")+'>Twice a month (custom days)</option>'
+    + '<option value="payday"'+(freq==="payday"?" selected":"")+'>Every payday</option></select>'
     + '<div id="expMonthWrap" class="'+(freq==="yearly"?"":"hidden")+'"><select id="expMonth" class="field" style="margin-top:.5rem">'+monthOpts+'</select></div></div>'
-    + '<div class="fgroup"><label id="expDueDayLbl" class="flabel">'+(freq==="semimonthly"?"1st due day":"Due day of month (optional)")+'</label>'
-    + '<input id="expDueDay" class="field" type="number" inputmode="numeric" min="1" max="31" value="'+(e&&e.dueDay?e.dueDay:"")+'" placeholder="e.g. 15" oninput="expUpdateRemindVisibility()">'
-    + '<div id="expDueDay2Wrap" class="'+(freq==="semimonthly"?"":"hidden")+'" style="margin-top:.5rem">'
+    + '<div id="expDueDayRow" class="'+(freq==="payday"?"hidden":(freq==="semimonthly"?"grid2":""))+'" style="margin-top:.9rem">'
+    + '<div class="fgroup" style="margin:0"><label id="expDueDayLbl" class="flabel">'+(freq==="semimonthly"?"1st due day":"Due day of month (optional)")+'</label>'
+    + '<input id="expDueDay" class="field" type="number" inputmode="numeric" min="1" max="31" value="'+(e&&e.dueDay?e.dueDay:"")+'" placeholder="e.g. 15" oninput="expUpdateRemindVisibility()"></div>'
+    + '<div id="expDueDay2Wrap" class="fgroup '+(freq==="semimonthly"?"":"hidden")+'" style="margin:0">'
     + '<label class="flabel">2nd due day</label>'
     + '<input id="expDueDay2" class="field" type="number" inputmode="numeric" min="1" max="31" value="'+(e&&e.dueDay2?e.dueDay2:"")+'" placeholder="e.g. 30" oninput="expUpdateRemindVisibility()"></div>'
-    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Powers Settings → Reminders. Leave blank if it varies. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-reminders\')">More info</button></p></div>'
-    + '<div id="expRemindWrap" class="fgroup '+(hasDueDay?"":"hidden")+'"><button class="field row" style="cursor:pointer" onclick="expRemindToggle(this)">'
+    + '</div>'
+    + '<div id="expDueDayCaption" class="fgroup '+(freq==="payday"?"hidden":"")+'" style="margin-top:.9rem"><p class="muted" style="font-size:.72rem">Powers reminders below. Leave blank if it varies. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-reminders\')">More info</button></p></div>'
+    + '<div id="expPaydayNote" class="fgroup '+(freq==="payday"?"":"hidden")+'" style="margin-top:.9rem">'+expPaydayNoteHtml()+'</div>'
+    + '<div id="expRemindWrap" class="fgroup '+((hasDueDay&&freq!=="payday")?"":"hidden")+'"><button class="field row" style="cursor:pointer" onclick="expRemindToggle(this)">'
     + '<span id="expRemindLbl" style="font-size:.875rem;font-weight:500">Remind me before this is due</span>'
     + '<span id="expRemind" class="toggle'+(remindOn?" on":"")+'" data-on="'+(remindOn?1:0)+'"><span class="knob"></span></span></button>'
     + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Change this anytime in Settings → Reminders. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-reminders\')">More info</button></p></div>'
@@ -4659,7 +4727,7 @@ function openExpenseForm(id, defaultType, presetGoalId){
     + '<div class="fgroup" style="margin-top:.9rem"><button class="field row" style="cursor:pointer" onclick="expCashFundToggle()">'
     + '<span style="font-size:.875rem;font-weight:500">Cash fund</span>'
     + '<span id="expCashFund" class="toggle'+(isCashFund?" on":"")+'" data-on="'+(isCashFund?1:0)+'"><span class="knob"></span></span></button>'
-    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">For money already set aside separately — physical cash, a separate account. Spending logs against it like any fund, but it won\'t reduce Available now, and you can correct its balance anytime instead of it resetting monthly. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p></div>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Money set aside separately — won\'t reduce Available now, and its balance corrects manually instead of resetting monthly. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p></div>'
     + '</div>'
 
     + activeBlock
@@ -4723,11 +4791,23 @@ function expGoalLinkChange(val){
 }
 function expFreqChange(val){
   document.getElementById("expMonthWrap").className = val==="yearly" ? "" : "hidden";
-  document.getElementById("expDueDay2Wrap").className = val==="semimonthly" ? "" : "hidden";
+  var row = document.getElementById("expDueDayRow");
+  if(row) row.className = val==="payday" ? "hidden" : (val==="semimonthly" ? "grid2" : "");
+  document.getElementById("expDueDay2Wrap").className = "fgroup " + (val==="semimonthly" ? "" : "hidden");
   document.getElementById("expDueDayLbl").textContent = val==="semimonthly" ? "1st due day" : "Due day of month (optional)";
+  var dueCaption = document.getElementById("expDueDayCaption");
+  if(dueCaption) dueCaption.className = "fgroup " + (val==="payday" ? "hidden" : "");
+  var paydayNote = document.getElementById("expPaydayNote");
+  if(paydayNote){ paydayNote.className = "fgroup " + (val==="payday" ? "" : "hidden"); paydayNote.innerHTML = expPaydayNoteHtml(); }
   expUpdateRemindVisibility();
 }
 function expUpdateRemindVisibility(){
+  var freqEl = document.getElementById("expFreq");
+  if(freqEl && freqEl.value==="payday"){
+    var w = document.getElementById("expRemindWrap");
+    if(w) w.className = "fgroup hidden";
+    return;
+  }
   var d1 = parseInt((document.getElementById("expDueDay")||{}).value, 10);
   var d2 = parseInt((document.getElementById("expDueDay2")||{}).value, 10);
   var has = (d1>=1 && d1<=31) || (d2>=1 && d2<=31);
@@ -4795,12 +4875,12 @@ function expSave(){
   if(linkedGoalId) type = "variable";
   var cat = catSel==="__new" ? document.getElementById("expNewCat").value.trim() : catSel;
   var month = parseInt(document.getElementById("expMonth").value,10) || 1;
-  var dueDayRaw = parseInt(document.getElementById("expDueDay").value,10);
+  var dueDayRaw = freq==="payday" ? NaN : parseInt(document.getElementById("expDueDay").value,10);
   var dueDay = (dueDayRaw>=1 && dueDayRaw<=31) ? dueDayRaw : null;
   var dueDay2Raw = freq==="semimonthly" ? parseInt(document.getElementById("expDueDay2").value,10) : NaN;
   var dueDay2 = (dueDay2Raw>=1 && dueDay2Raw<=31) ? dueDay2Raw : null;
   var remindEl = document.getElementById("expRemind");
-  var remindOff = remindEl ? remindEl.getAttribute("data-on")!=="1" : true;
+  var remindOff = freq==="payday" ? true : (remindEl ? remindEl.getAttribute("data-on")!=="1" : true);
   if(!cat) return fail("Pick or type a category.");
   var defaultPayEl = document.getElementById("expDefaultPayMethod");
   var defaultPayMethod = linkedGoalId ? undefined : (defaultPayEl
