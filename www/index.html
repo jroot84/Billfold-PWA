@@ -3863,15 +3863,13 @@ var SETTINGS_SECTIONS = [
   ["updates", "What's new", "See recent updates to Billfold", "trend"],
   ["reset", "Start over", "Erase everything and start fresh", "reset"]
 ];
-var INSTALL_SETTINGS_ROW = ["install", "Install Billfold", "Add it to your home screen", "down"];
 var DEV_SETTINGS_ROW = ["dev", "Developer options", "PIN-protected diagnostics & testing", "toolbox"];
 /* Developer options stays off this list until revealed via the tap trick + PIN (see devSecretTap),
    then — like Samsung's real Developer options — it stays a normal, permanently visible row from
    then on, surviving app updates. Only "Start over" (or a fresh install) clears it, since both
    reset S back to seedState(). */
 function visibleSettingsSections(){
-  var list = isWebOnly() ? [INSTALL_SETTINGS_ROW].concat(SETTINGS_SECTIONS) : SETTINGS_SECTIONS;
-  return S.devOptionsRevealed ? list.concat([DEV_SETTINGS_ROW]) : list;
+  return S.devOptionsRevealed ? SETTINGS_SECTIONS.concat([DEV_SETTINGS_ROW]) : SETTINGS_SECTIONS;
 }
 function openSettingsSection(key){
   if(key==="dev" && !devUnlocked){ openDevPinPrompt(); return; }
@@ -3881,18 +3879,22 @@ function openSettingsSection(key){
 // as the popup calculator's calcModalRoot) — so a "More info" link from inside a form doesn't
 // lose what you were typing. Closing it just clears this overlay; the form underneath was
 // never touched.
+var openHelpItemId = null;
 function openHelpItem(id){
   var item = HELP_ITEMS.filter(function(h){ return h.id===id; })[0];
   if(!item) return;
+  openHelpItemId = id;
+  var body = item.body;
+  if(id==="help-install") body = installDetailCard() + '<div class="divider" style="margin:1rem 0"></div>' + body;
   document.getElementById("helpOverlayRoot").innerHTML =
     '<div class="overlay" style="z-index:60" onclick="if(event.target===this)closeHelpOverlay()">'
     + '<div class="sheet"><div class="sheet-head"><h2>'+esc(item.title)+'</h2>'
     + '<button aria-label="Close" style="color:var(--sub);padding:.3rem" onclick="closeHelpOverlay()">'+icon("x",20)+'</button></div>'
-    + '<div style="font-size:.875rem;line-height:1.6">'+item.body+'</div>'
+    + '<div style="font-size:.875rem;line-height:1.6">'+body+'</div>'
     + '<button class="btn btn-pine" style="width:100%;margin-top:1.25rem" onclick="closeHelpOverlay()">Done</button>'
     + '</div></div>';
 }
-function closeHelpOverlay(){ document.getElementById("helpOverlayRoot").innerHTML = ""; }
+function closeHelpOverlay(){ document.getElementById("helpOverlayRoot").innerHTML = ""; openHelpItemId = null; }
 function closeSettingsSection(){ settingsSubScreen = null; window.scrollTo(0,0); render(); }
 function settingsBackHeader(title){
   return '<div class="row" style="margin-bottom:.75rem">'
@@ -3936,10 +3938,9 @@ function dataScreen(){
 }
 function settingsDetailScreen(key){
   if(key==="dev" && !devUnlocked){ settingsSubScreen = null; return settingsListScreen(); }
-  var titles = {backup:"Back up & restore", goals:"Setup", reminders:"Reminders", tabs:"Tabs & appearance", lock:"App lock", help:"Help", about:"About Billfold", updates:"What's new", reset:"Start over", dev:"Developer options", install:"Install Billfold"};
+  var titles = {backup:"Back up & restore", goals:"Setup", reminders:"Reminders", tabs:"Tabs & appearance", lock:"App lock", help:"Help", about:"About Billfold", updates:"What's new", reset:"Start over", dev:"Developer options"};
   var body;
   if(key==="backup") body = backupDetailCard();
-  else if(key==="install") body = installDetailCard();
   else if(key==="goals") body = goalsSettingsCard();
   else if(key==="reminders") body = remindersCard();
   else if(key==="tabs") body = tabsDetailCard();
@@ -4050,15 +4051,14 @@ function tabsDetailCard(){
 // browsers), or one that can't (Safari/iOS) — Apple has never let a website trigger "Add to
 // Home Screen" from code, so that case gets exact manual steps instead of a broken button.
 function installDetailCard(){
-  var moreInfo = ' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-install\')">More info</button>';
   var standalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || !!navigator.standalone;
   if(standalone){
-    return '<p class="muted" style="font-size:.9rem">Already installed on this device — this is that installed copy, running now. Nothing else to do here.'+moreInfo+'</p>';
+    return '<p class="muted" style="font-size:.9rem">Already installed on this device — this is that installed copy, running now. Nothing else to do here.</p>';
   }
   var ua = navigator.userAgent || "";
   var isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
   if(deferredInstallPrompt){
-    return '<p class="muted" style="font-size:.9rem;margin-bottom:1rem">Adds a Billfold icon to your home screen that opens full-screen, like a regular app — no browser bar, no app store.'+moreInfo+'</p>'
+    return '<p class="muted" style="font-size:.9rem;margin-bottom:1rem">Adds a Billfold icon to your home screen that opens full-screen, like a regular app — no browser bar, no app store.</p>'
       + '<button class="btn btn-pine" style="width:100%" onclick="triggerInstallPrompt()">'+icon("down",16)+' Install Billfold</button>';
   }
   if(isIOS){
@@ -4068,16 +4068,16 @@ function installDetailCard(){
       + '<li>Scroll down and tap <b>Add to Home Screen</b></li>'
       + '<li>Tap <b>Add</b> in the top corner</li>'
       + '</ol>'
-      + '<p class="muted" style="font-size:.75rem;margin-top:.75rem">Must be opened directly in Safari — this doesn\'t work from inside another app\'s built-in browser (Gmail, Instagram, etc.).'+moreInfo+'</p>';
+      + '<p class="muted" style="font-size:.75rem;margin-top:.75rem">Must be opened directly in Safari — this doesn\'t work from inside another app\'s built-in browser (Gmail, Instagram, etc.).</p>';
   }
-  return '<p class="muted" style="font-size:.9rem">This browser hasn\'t offered an install prompt yet — sometimes it takes a moment after loading, or it may not support it. Look for \u201cInstall app\u201d or \u201cAdd to Home screen\u201d in its menu as a fallback.'+moreInfo+'</p>';
+  return '<p class="muted" style="font-size:.9rem">This browser hasn\'t offered an install prompt yet — sometimes it takes a moment after loading, or it may not support it. Look for \u201cInstall app\u201d or \u201cAdd to Home screen\u201d in its menu as a fallback.</p>';
 }
 function triggerInstallPrompt(){
   if(!deferredInstallPrompt) return;
   deferredInstallPrompt.prompt();
   deferredInstallPrompt.userChoice.then(function(){
     deferredInstallPrompt = null;
-    if(view.screen==="data" && settingsSubScreen==="install") render();
+    if(openHelpItemId==="help-install") openHelpItem("help-install");
   });
 }
 function backupDetailCard(){
@@ -5998,11 +5998,11 @@ document.addEventListener("keydown", calcKeydown);
 window.addEventListener("beforeinstallprompt", function(e){
   e.preventDefault();
   deferredInstallPrompt = e;
-  if(view.screen==="data" && settingsSubScreen==="install") render();
+  if(openHelpItemId==="help-install") openHelpItem("help-install");
 });
 window.addEventListener("appinstalled", function(){
   deferredInstallPrompt = null;
-  if(view.screen==="data" && settingsSubScreen==="install") render();
+  if(openHelpItemId==="help-install") openHelpItem("help-install");
 });
 if(isWebOnly() && !inviteVerified()){
   inviteGateRender();
