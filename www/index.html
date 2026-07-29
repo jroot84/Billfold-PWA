@@ -804,6 +804,10 @@ function ensureStateDefaultsAndMigrations(){
 }
 ensureStateDefaultsAndMigrations();
 var view = { screen:"month", y:(new Date()).getFullYear(), m:(new Date()).getMonth()+1 };
+// Chrome/Edge (and similar) fire this once they've decided the site is installable, handing
+// over an event whose .prompt() call is the only way to trigger the real native "Install app"
+// dialog from a button click. Safari never fires this at all — see installDetailCard below.
+var deferredInstallPrompt = null;
 var payId = null, payOcc = 1, editId = null, confirmDel = false, confirmReset = false, pickerYear = null, reportScope = "month";
 // Spending/Savings-only lookback period — separate from reportScope, which stays tied to
 // "current reality" for Bills/Debts. month|year|last3|last6|last12|custom.
@@ -3859,13 +3863,15 @@ var SETTINGS_SECTIONS = [
   ["updates", "What's new", "See recent updates to Billfold", "trend"],
   ["reset", "Start over", "Erase everything and start fresh", "reset"]
 ];
+var INSTALL_SETTINGS_ROW = ["install", "Install Billfold", "Add it to your home screen", "down"];
 var DEV_SETTINGS_ROW = ["dev", "Developer options", "PIN-protected diagnostics & testing", "toolbox"];
 /* Developer options stays off this list until revealed via the tap trick + PIN (see devSecretTap),
    then — like Samsung's real Developer options — it stays a normal, permanently visible row from
    then on, surviving app updates. Only "Start over" (or a fresh install) clears it, since both
    reset S back to seedState(). */
 function visibleSettingsSections(){
-  return S.devOptionsRevealed ? SETTINGS_SECTIONS.concat([DEV_SETTINGS_ROW]) : SETTINGS_SECTIONS;
+  var list = isWebOnly() ? [INSTALL_SETTINGS_ROW].concat(SETTINGS_SECTIONS) : SETTINGS_SECTIONS;
+  return S.devOptionsRevealed ? list.concat([DEV_SETTINGS_ROW]) : list;
 }
 function openSettingsSection(key){
   if(key==="dev" && !devUnlocked){ openDevPinPrompt(); return; }
@@ -3930,9 +3936,10 @@ function dataScreen(){
 }
 function settingsDetailScreen(key){
   if(key==="dev" && !devUnlocked){ settingsSubScreen = null; return settingsListScreen(); }
-  var titles = {backup:"Back up & restore", goals:"Setup", reminders:"Reminders", tabs:"Tabs & appearance", lock:"App lock", help:"Help", about:"About Billfold", updates:"What's new", reset:"Start over", dev:"Developer options"};
+  var titles = {backup:"Back up & restore", goals:"Setup", reminders:"Reminders", tabs:"Tabs & appearance", lock:"App lock", help:"Help", about:"About Billfold", updates:"What's new", reset:"Start over", dev:"Developer options", install:"Install Billfold"};
   var body;
   if(key==="backup") body = backupDetailCard();
+  else if(key==="install") body = installDetailCard();
   else if(key==="goals") body = goalsSettingsCard();
   else if(key==="reminders") body = remindersCard();
   else if(key==="tabs") body = tabsDetailCard();
@@ -4037,6 +4044,41 @@ function tabsDetailCard(){
     + '</ul>';
   h += '<div class="divider"></div><h2 class="eyebrow">Appearance</h2>' + appearanceCard();
   return h;
+}
+// Three real states, not one generic message: already running installed (nothing to do),
+// a browser that can trigger the native install dialog directly (Chrome/Edge/most Android
+// browsers), or one that can't (Safari/iOS) — Apple has never let a website trigger "Add to
+// Home Screen" from code, so that case gets exact manual steps instead of a broken button.
+function installDetailCard(){
+  var moreInfo = ' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-install\')">More info</button>';
+  var standalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || !!navigator.standalone;
+  if(standalone){
+    return '<p class="muted" style="font-size:.9rem">Already installed on this device — this is that installed copy, running now. Nothing else to do here.'+moreInfo+'</p>';
+  }
+  var ua = navigator.userAgent || "";
+  var isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+  if(deferredInstallPrompt){
+    return '<p class="muted" style="font-size:.9rem;margin-bottom:1rem">Adds a Billfold icon to your home screen that opens full-screen, like a regular app — no browser bar, no app store.'+moreInfo+'</p>'
+      + '<button class="btn btn-pine" style="width:100%" onclick="triggerInstallPrompt()">'+icon("down",16)+' Install Billfold</button>';
+  }
+  if(isIOS){
+    return '<p class="muted" style="font-size:.9rem;margin-bottom:1rem">iPhones and iPads don\'t let a website trigger this directly — Apple only allows it from Safari\'s own Share menu. A few taps:</p>'
+      + '<ol style="font-size:.9rem;line-height:2;padding-left:1.1rem">'
+      + '<li>Tap the <b>Share</b> icon in Safari\'s toolbar (a square with an arrow pointing up)</li>'
+      + '<li>Scroll down and tap <b>Add to Home Screen</b></li>'
+      + '<li>Tap <b>Add</b> in the top corner</li>'
+      + '</ol>'
+      + '<p class="muted" style="font-size:.75rem;margin-top:.75rem">Must be opened directly in Safari — this doesn\'t work from inside another app\'s built-in browser (Gmail, Instagram, etc.).'+moreInfo+'</p>';
+  }
+  return '<p class="muted" style="font-size:.9rem">This browser hasn\'t offered an install prompt yet — sometimes it takes a moment after loading, or it may not support it. Look for \u201cInstall app\u201d or \u201cAdd to Home screen\u201d in its menu as a fallback.'+moreInfo+'</p>';
+}
+function triggerInstallPrompt(){
+  if(!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  deferredInstallPrompt.userChoice.then(function(){
+    deferredInstallPrompt = null;
+    if(view.screen==="data" && settingsSubScreen==="install") render();
+  });
 }
 function backupDetailCard(){
   var on = S.backupRemindersOn!==false;
@@ -4289,6 +4331,8 @@ function dtDelete(){
   persist(); closeModal(); render();
 }
 var HELP_ITEMS = [
+  { id:"help-install", title:"Install Billfold to your home screen",
+    body:"The web version works fully in a browser tab, but \u201cinstalling\u201d it adds a proper icon to your home screen that opens full-screen, with no browser bar — the closest thing to an app without going through an app store. The steps are different on Android and iPhone, since only one of them lets Billfold help directly. <b>On Android</b> (Chrome, Edge, and most other browsers): open Settings → Install Billfold and tap the button there — it's a real install prompt from the browser itself. If the button isn't showing yet, give the page a moment after loading, or look for \u201cInstall app\u201d in your browser's own menu (usually the ⋮ icon) as a fallback. <b>On iPhone or iPad</b>: this has to be done by hand — Apple doesn't let any website trigger it directly, only Safari's own Share menu can. Open Billfold in Safari (not Chrome, and not a browser tab inside another app like Gmail or Instagram — it has to be Safari itself), tap the <b>Share</b> icon in the toolbar (a square with an arrow pointing up), scroll down and tap <b>Add to Home Screen</b>, then tap <b>Add</b> in the top corner. Either way, the result behaves the same: your data stays exactly where it already is on that device, since installing doesn't move or duplicate anything — it's just a shortcut to the same browser storage Billfold was already using." },
   { id:"help-setup-expenses", title:"Set up your expenses",
     body:"Head to the Bills tab and tap the add button. Pick a type: Bill for anything due on a schedule — rent, insurance, a subscription, a utility bill that changes month to month. Set a default amount now; checking it off pays that amount, or tap it first to enter the real amount before confirming if a bill comes in different. Fund for a monthly budget on spending that varies (groceries, gas) — this is the only type spending entries can pull from. Bills get a category (which powers your reports) and an optional due day that unlocks a per-expense reminder toggle. \u201cEvery payday\u201d is a separate How-often option for a bill tied to your actual pay schedule instead of a calendar day — a car payment or transfer that goes out whenever you get paid. It follows Settings → Income directly, so it needs Income set to Paycheck mode with Weekly or Every-2-weeks pay; there's no due day to set and no reminder, since a paycheck-driven date drifts through the calendar rather than landing on a fixed day. Most months it's 2 payments, occasionally 3 when the cycle lines up that way — the Month tab shows however many actually fall in a given month." },
   { id:"help-funds", title:"Budget for spending that varies",
@@ -5951,6 +5995,15 @@ if(window.matchMedia){
   });
 }
 document.addEventListener("keydown", calcKeydown);
+window.addEventListener("beforeinstallprompt", function(e){
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  if(view.screen==="data" && settingsSubScreen==="install") render();
+});
+window.addEventListener("appinstalled", function(){
+  deferredInstallPrompt = null;
+  if(view.screen==="data" && settingsSubScreen==="install") render();
+});
 if(isWebOnly() && !inviteVerified()){
   inviteGateRender();
 } else if(lockIsSet()){
