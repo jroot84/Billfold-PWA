@@ -29,6 +29,11 @@
     --chip:#1B3A2E; --chip-fg:#4CAF8C;
   }
   *{ box-sizing:border-box; margin:0; }
+  *{ scrollbar-width:thin; scrollbar-color:var(--track) transparent; }
+  ::-webkit-scrollbar{ width:6px; height:6px; }
+  ::-webkit-scrollbar-track{ background:transparent; }
+  ::-webkit-scrollbar-thumb{ background:var(--track); border-radius:999px; }
+  ::-webkit-scrollbar-thumb:hover{ background:var(--sub); }
   html,body{ height:100%; }
   body{
     background:var(--paper); color:var(--ink);
@@ -213,15 +218,22 @@
   /* modal */
   .overlay{ position:fixed; inset:0; z-index:50; background:rgba(20,30,35,.45);
     display:flex; align-items:flex-end; justify-content:center; }
-  .sheet{ width:100%; max-height:90vh; overflow-y:auto; background:var(--card);
-    border-radius:1rem 1rem 0 0; padding:1.25rem;
-    /* clear a 3-button Android nav bar the same way the header clears the notch */
-    padding-bottom:calc(1.25rem + env(safe-area-inset-bottom, 0px)); }
+  .sheet{ width:100%; height:92vh; max-height:92vh; display:flex; flex-direction:column;
+    background:var(--card); border-radius:1rem 1rem 0 0; overflow:hidden; position:relative; }
   @media (min-width:640px){
     .overlay{ align-items:center; }
-    .sheet{ max-width:28rem; border-radius:1rem; }
+    .sheet{ height:auto; max-height:85vh; max-width:28rem; border-radius:1rem; }
   }
-  .sheet-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem; }
+  .sheet-head{ flex:none; display:flex; align-items:center; justify-content:space-between;
+    padding:1.25rem 1.25rem 1rem; border-bottom:1px solid var(--line); }
+  .sheet-body{ flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain;
+    position:relative; padding:1rem 1.25rem;
+    /* clear a 3-button Android nav bar the same way the header clears the notch */
+    padding-bottom:calc(1.25rem + env(safe-area-inset-bottom, 0px)); }
+  .sheet-fade{ position:absolute; left:0; right:0; bottom:0; height:28px;
+    background:linear-gradient(to bottom, transparent, var(--card));
+    pointer-events:none; opacity:0; transition:opacity .15s; }
+  .sheet-fade.show{ opacity:1; }
   .sheet-head h2{ font-size:1.1rem; font-weight:700; }
 
   .month-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:.5rem; }
@@ -281,6 +293,10 @@
    ================================================================ */
 
 var KEY = "billfold:v1";
+// Bumped by hand every time this source file is substantively edited — lets both Jonathan and
+// Claude tell at a glance which working copy is in front of them (shown on the What's new page),
+// independent of the app's release version below, which only moves at actual release points.
+var INDEX_BUILD = { number: 1, updated: "2026-07-30" };
 var MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 var MS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 var CHART_COLORS = ["#1F6F54","#3E7CB1","#C77B30","#7A5AA6","#B2456E","#5C8A3A","#8A6D3B","#4A6670","#9C4DCC","#2E8B8B"];
@@ -2647,16 +2663,18 @@ function openCalcModal(targetInput){
       + '<button class="btn btn-pine" onclick="applyCalcToInput()">Use result</button>'
       + '</div>'
     : '<button class="btn btn-pine" style="width:100%;margin-top:.75rem" onclick="cancelCalcModal()">Done</button>';
-  document.getElementById("calcModalRoot").innerHTML =
+  var calcRoot = document.getElementById("calcModalRoot");
+  if(!calcRoot.innerHTML) lockBodyScroll();
+  calcRoot.innerHTML =
     '<div class="overlay" style="z-index:60" onclick="if(event.target===this)cancelCalcModal()">'
-    + '<div class="sheet"><div class="sheet-head"><h2>Calculator</h2>'
-    + '<button aria-label="Close" style="color:var(--sub);padding:.3rem" onclick="cancelCalcModal()">'+icon("x",20)+'</button></div>'
-    + '<div class="calc-top" id="calcTop"></div>'
-    + '<div class="calc-display" id="calcDisplay">0</div>'
-    + '<div class="calc-hist" id="calcHistWrap" style="margin-top:.4rem"></div>'
-    + '<div style="margin-top:.5rem">'+keys+'</div>'
-    + footer
-    + '</div></div>';
+    + sheetHtml("Calculator", "cancelCalcModal",
+        '<div class="calc-top" id="calcTop"></div>'
+        + '<div class="calc-display" id="calcDisplay">0</div>'
+        + '<div class="calc-hist" id="calcHistWrap" style="margin-top:.4rem"></div>'
+        + '<div style="margin-top:.5rem">'+keys+'</div>'
+        + footer)
+    + '</div>';
+  wireSheetScroll(calcRoot);
   calcRefresh();
 }
 function openCalcForInput(btn){
@@ -2667,6 +2685,7 @@ function openCalcForInput(btn){
 function cancelCalcModal(){
   if(padState) calcState.history = padState.history.slice();
   document.getElementById("calcModalRoot").innerHTML = "";
+  unlockBodyScroll();
   activeCalc = calcState; calcTargetInput = null; padState = null;
 }
 function applyCalcToInput(){
@@ -2676,6 +2695,7 @@ function applyCalcToInput(){
   var inp = calcTargetInput;
   if(padState) calcState.history = padState.history.slice();
   document.getElementById("calcModalRoot").innerHTML = "";
+  unlockBodyScroll();
   activeCalc = calcState; calcTargetInput = null; padState = null;
   if(inp){
     inp.value = String(val);
@@ -3927,15 +3947,21 @@ function openHelpItem(id){
   openHelpItemId = id;
   var body = item.body;
   if(id==="help-install") body = installDetailCard() + '<div class="divider" style="margin:1rem 0"></div>' + body;
-  document.getElementById("helpOverlayRoot").innerHTML =
+  var helpRoot = document.getElementById("helpOverlayRoot");
+  if(!helpRoot.innerHTML) lockBodyScroll();
+  helpRoot.innerHTML =
     '<div class="overlay" style="z-index:60" onclick="if(event.target===this)closeHelpOverlay()">'
-    + '<div class="sheet"><div class="sheet-head"><h2>'+esc(item.title)+'</h2>'
-    + '<button aria-label="Close" style="color:var(--sub);padding:.3rem" onclick="closeHelpOverlay()">'+icon("x",20)+'</button></div>'
-    + '<div style="font-size:.875rem;line-height:1.6">'+body+'</div>'
-    + '<button class="btn btn-pine" style="width:100%;margin-top:1.25rem" onclick="closeHelpOverlay()">Done</button>'
-    + '</div></div>';
+    + sheetHtml(esc(item.title), "closeHelpOverlay",
+        '<div style="font-size:.875rem;line-height:1.6">'+body+'</div>'
+        + '<button class="btn btn-pine" style="width:100%;margin-top:1.25rem" onclick="closeHelpOverlay()">Done</button>')
+    + '</div>';
+  wireSheetScroll(helpRoot);
 }
-function closeHelpOverlay(){ document.getElementById("helpOverlayRoot").innerHTML = ""; openHelpItemId = null; }
+function closeHelpOverlay(){
+  document.getElementById("helpOverlayRoot").innerHTML = "";
+  unlockBodyScroll();
+  openHelpItemId = null;
+}
 function closeSettingsSection(){ settingsSubScreen = null; window.scrollTo(0,0); render(); }
 function settingsBackHeader(title){
   return '<div class="row" style="margin-bottom:.75rem">'
@@ -4007,8 +4033,9 @@ var UPDATE_LOG = [
       "Linking an expense to a savings goal is now its own field, independent of Category — previously picking a goal secretly replaced the category with a synthetic \"→ Goal Name\" string. Category is fully yours to manage now; picking a goal still locks the expense's type to Bill, since a Fund can't feed one.",
       "Debts and credit cards now show up as bills in their own \"Credit & debt\" section at the top of the Month tab, with a payoff method: \"Balance in full\" (the bill defaults to the live balance; checking it off zeroes it out) or \"Set amount\" (a fixed monthly payment, same as a regular bill — required for loans, optional for credit). A \"Balance in full\" card that's already marked paid reopens automatically if a new charge comes in. Credit is now the default type (and first in the list) when adding a new one, since it's added more often than loans.",
       "\"Don't adjust a balance\" is now an option everywhere money gets paid from — bills, debts — not just spending entries, for anything already accounted for elsewhere (an autopay from an untracked account, a payroll deduction, cash payment). Marking something paid this way still updates its own paid status normally; it just skips touching Available now or any card balance.",
-      "Funds can now be flagged \"Cash fund\" for money already set aside separately — physical cash, a separate account. A cash fund tracks a running balance instead of a monthly budget: it doesn't reset each month and doesn't reduce Available now, since that money was never part of it to begin with.",
+      "Funds can now be flagged \"Cash fund\" for spending you pay for with cash you've already set aside, instead of your tracked balance or a card. It works exactly like a regular fund — a monthly budget that resets each month — it just never reduces Available now, since that money was never part of it to begin with.",
       "Any fund's edit screen now has an \"Adjust remaining\" link to correct that month's left amount directly — say, a missed receipt or a purchase that shouldn't count the usual way. It's logged as its own correction, tied to whichever month you're viewing, and never shows up as spending or in reports.",
+      "What's new now shows a source build number and date at the top — a plain marker for telling working copies of the file apart while it's still in development, separate from the version numbers below.",
       "\"My money\" on the Month tab now shows just Available now and Net remaining up front, with the supporting numbers (still due, funds left, rest of year) tucked behind a \"Show the math\" toggle — Available now stays directly editable either way.",
       "Bills and Log each get a floating add button instead of a button pinned to the top of the list, so it's reachable without scrolling back up — Settings' combined Income/goals/debts screen keeps its inline buttons instead, since that page has two separate lists to add to.",
       "The Android back button now returns to the Month tab from any other tab before it'll exit the app, instead of exiting from wherever you happen to be.",
@@ -4056,7 +4083,11 @@ var UPDATE_LOG = [
   }
 ];
 function updatesDetailCard(){
-  return UPDATE_LOG.map(function(rel, i){
+  return '<div class="row" style="margin-bottom:1rem;padding-bottom:.75rem;border-bottom:1px solid var(--line)">'
+    + '<span class="muted" style="font-size:.75rem">Source build</span>'
+    + '<span class="tnum muted" style="font-size:.75rem">#'+INDEX_BUILD.number+' · '+esc(INDEX_BUILD.updated)+'</span>'
+    + '</div>'
+    + UPDATE_LOG.map(function(rel, i){
     return '<div style="'+(i>0?"margin-top:1.1rem":"")+'">'
       + '<div class="row" style="margin-bottom:.4rem">'
       + '<span style="font-weight:700;font-size:.9rem">Version '+esc(rel.version)+'</span>'
@@ -4403,7 +4434,7 @@ var HELP_ITEMS = [
       + "</ol>"
       + '<p class="help-p">Billfold subtracts spending from the budget automatically, so you can see what\u2019s left. A toggle also offers to subtract it from that month\u2019s Available now — worth leaving on, so Available now reflects money you\u2019ve actually spent.</p>'
       + '<p class="help-p">A fund can\u2019t go below $0. If an entry would push it past its budget, check <b>Unplanned</b> to log it anyway — it still counts in reports under that fund\u2019s category, it just won\u2019t drag the fund\u2019s remaining negative.</p>'
-      + '<p class="help-p"><b>Cash fund</b> — flip this on when adding a fund for money you\u2019ve already set aside separately, like physical cash or a separate account. Instead of a monthly budget, it tracks a running balance: it doesn\u2019t reset each month, and it doesn\u2019t reduce Available now, since that money was never part of it. Spending against it logs the same way as any fund.</p>' },
+      + '<p class="help-p"><b>Cash fund</b> — flip this on when adding a fund for spending you pay for with cash you\u2019ve already set aside separately, like physical cash or a separate account. It still works like any fund \u2014 a monthly budget that resets each month \u2014 it just never reduces Available now, since that money was never part of it. Use <b>Adjust remaining</b> if the actual amount on hand doesn\u2019t match what Billfold has tracked.</p>' },
   { id:"help-spending-needs-fund", title:"Why every spending entry needs a fund",
     body:"<p>Every spending entry ties to a Fund. A couple of things are intentional here:</p>"
       + '<ul class="help-list">'
@@ -4540,13 +4571,13 @@ function setHelpSearch(input){
 function clearHelpSearch(){ helpSearchQuery = ""; render(); }
 var GLOSSARY_ITEMS = [
   { term:"Bill", def:"Due on a schedule — rent, a subscription, insurance, a utility bill. Checking it off marks it paid using the default amount; tap it first to enter the real amount before confirming if it differs. No partial payments; it's either unpaid (showing the default) or paid (showing what you confirmed). The amount locks once paid — mark it unpaid first if you need to correct it.", linkLabel:"Add a bill", onclick:"billsSubMode='bills';go('bills');openExpenseForm(null,'variable')" },
-  { term:"Fund", def:"A monthly budget for a category of spending that varies, like groceries or gas — the only thing spending entries can pull from. A Cash fund (see below) works differently.", linkLabel:"Set up a fund", onclick:"billsSubMode='funds';go('bills');openExpenseForm(null,'fund')" },
+  { term:"Fund", def:"A monthly budget for a category of spending that varies, like groceries or gas — the only thing spending entries can pull from. A Cash fund (see below) works the same way, just paid for with cash already set aside.", linkLabel:"Set up a fund", onclick:"billsSubMode='funds';go('bills');openExpenseForm(null,'fund')" },
   { term:"Spending entry", def:"A single day-to-day expense logged in your ledger, always tied to a Fund — check “Unplanned” if it goes beyond that fund's budget.", linkLabel:"Log a spending entry", onclick:"trackMode='journal';go('track');openJournalForm(null)" },
   { term:"Savings entry", def:"A deposit or withdrawal logged against one of your savings goals.", linkLabel:"Log a savings entry", onclick:"trackMode='savings';go('track');openSavingsEntryForm(null)" },
   { term:"Goal", def:"A named savings target with a dollar amount — up to 5 at a time — that your savings entries count toward.", linkLabel:"Add a goal", onclick:"openSettingsSection('goals');openGoalForm(null)" },
   { term:"Debt / credit", def:"A card or loan you're tracking the payoff of. Credit is revolving — chargeable from bills or spending — with a choice between paying the balance in full each month or a set amount. A Loan can't be charged to and is always a set monthly payment. Either way it shows up on the Month tab like a bill, with no interest math — just a running balance you correct by hand against your statement.", linkLabel:"Add debt or credit", onclick:"openSettingsSection('goals');openDebtForm(null)" },
-  { term:"Cash fund", def:"A Fund for money already set aside separately — physical cash, a separate account. Unlike a regular Fund, it tracks a running balance instead of a monthly budget: it doesn't reset each month, and it doesn't reduce Available now, since that money was never part of it to begin with.", linkLabel:"Add a cash fund", onclick:"billsSubMode='funds';go('bills');openExpenseForm(null,'fund')" },
-  { term:"Balance adjustment", def:"A logged correction to a cash fund's balance — say, after counting your wallet and finding it doesn't match. Recorded as its own entry so there's a record of why the balance moved, rather than the number just quietly changing.", linkLabel:"About cash funds", onclick:"openHelpItem('help-funds')" },
+  { term:"Cash fund", def:"A Fund for spending you pay for with cash already set aside separately — physical cash, a separate account. It works exactly like a regular Fund, with a monthly budget that resets each month; the only difference is it doesn't reduce Available now, since that money was never part of it to begin with.", linkLabel:"Add a cash fund", onclick:"billsSubMode='funds';go('bills');openExpenseForm(null,'fund')" },
+  { term:"Balance adjustment", def:"A logged correction to any fund's remaining amount for the month — say, a missed receipt, or a cash fund where the actual amount on hand doesn't match. Recorded as its own entry so there's a record of why the number moved, rather than it just quietly changing.", linkLabel:"About funds", onclick:"openHelpItem('help-funds')" },
   { term:"Hidden tab", def:"A tab removed from the bottom tab bar for daily use, but still fully there — open it anytime by tapping its name in Settings → Tabs & appearance.", linkLabel:"Manage tabs", onclick:"openSettingsSection('tabs')" }
 ];
 function helpDetailCard(){
@@ -4621,12 +4652,49 @@ function doReset(){
 
 
 /* ================= MODALS ================= */
+// Three separate overlay roots (modalRoot, calcModalRoot, helpOverlayRoot) can be open at
+// once, stacked — a "More info" link or the popup calculator can open on top of a form that's
+// already open. A simple open-count keeps the background page locked as long as ANY of them
+// is up, and only unlocks once the last one closes, instead of each one fighting over a single
+// on/off flag.
+var openOverlayCount = 0;
+function lockBodyScroll(){
+  openOverlayCount++;
+  if(openOverlayCount === 1) document.body.style.overflow = "hidden";
+}
+function unlockBodyScroll(){
+  openOverlayCount = Math.max(0, openOverlayCount - 1);
+  if(openOverlayCount === 0) document.body.style.overflow = "";
+}
+// Shows a fade + hint at the bottom edge of a sheet's scrollable body whenever there's more
+// content below the fold, and hides it once scrolled to the end — so it's never ambiguous
+// whether a form needs scrolling.
+function wireSheetScroll(root){
+  var body = root.querySelector(".sheet-body");
+  var fade = root.querySelector(".sheet-fade");
+  if(!body || !fade) return;
+  function update(){
+    var more = (body.scrollHeight - body.scrollTop - body.clientHeight) > 2;
+    fade.className = "sheet-fade" + (more ? " show" : "");
+  }
+  body.addEventListener("scroll", update);
+  window.addEventListener("resize", update);
+  update();
+}
+function sheetHtml(title, closeFn, inner, footer){
+  return '<div class="sheet"><div class="sheet-head"><h2>'+title+'</h2>'
+    + '<button aria-label="Close" style="color:var(--sub);padding:.3rem" onclick="'+closeFn+'()">'+icon("x",20)+'</button></div>'
+    + '<div class="sheet-body">' + inner + '</div>'
+    + '<div class="sheet-fade"></div>'
+    + (footer || '')
+    + '</div>';
+}
 function modal(title, inner){
-  document.getElementById("modalRoot").innerHTML =
-    '<div class="overlay" onclick="if(event.target===this)closeModal()">'
-    + '<div class="sheet"><div class="sheet-head"><h2>'+title+'</h2>'
-    + '<button aria-label="Close" style="color:var(--sub);padding:.3rem" onclick="closeModal()">'+icon("x",20)+'</button></div>'
-    + inner + '</div></div>';
+  var root = document.getElementById("modalRoot");
+  if(!root.innerHTML) lockBodyScroll();
+  root.innerHTML = '<div class="overlay" onclick="if(event.target===this)closeModal()">'
+    + sheetHtml(title, "closeModal", inner) + '</div>';
+  wireSheetScroll(root);
   focusFirstField();
 }
 /* Auto-focus the first real field so a mouse/keyboard user can start typing or tabbing right
@@ -4643,6 +4711,7 @@ function focusFirstField(){
 }
 function closeModal(){
   document.getElementById("modalRoot").innerHTML="";
+  unlockBodyScroll();
   payId=null; editId=null; confirmDel=false;
   jEditId=null; jConfirmDel=false; sEditId=null; sConfirmDel=false;
   fundEditId=null; fundConfirmDel=false;
@@ -4849,7 +4918,7 @@ function openExpenseForm(id, defaultType, presetGoalId){
   var remindOn = e ? !e.remindOff : false;
   var isCashFund = e ? !!e.cashFund : false;
   var amountVal = e ? num(type==="fund" ? e.budget : e.estimate) : "";
-  var amountLbl = type==="fund" ? (isCashFund ? "Starting balance" : "Monthly budget") : "Amount";
+  var amountLbl = type==="fund" ? "Monthly budget" : "Amount";
 
   var typeBlock = '<div class="fgroup" id="expTypeBlockWrap">' + expTypeBlockHtml(type, isGoalLinked, !!e) + '</div>';
 
@@ -4910,7 +4979,7 @@ function openExpenseForm(id, defaultType, presetGoalId){
     + '<div class="fgroup" style="margin-top:.9rem"><button class="field row" style="cursor:pointer" onclick="expCashFundToggle()">'
     + '<span style="font-size:.875rem;font-weight:500">Cash fund</span>'
     + '<span id="expCashFund" class="toggle'+(isCashFund?" on":"")+'" data-on="'+(isCashFund?1:0)+'"><span class="knob"></span></span></button>'
-    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Money set aside separately — won\'t reduce Available now, and its balance corrects manually instead of resetting monthly. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p></div>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">For spending you pay for with cash you\'ve already set aside — resets monthly like any fund, it just won\'t reduce Available now. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p></div>'
     + '</div>'
 
     + activeBlock
@@ -4927,10 +4996,8 @@ function expTypeChange(val){
   var fundWrap = document.getElementById("expFundWrap");
   if(billWrap) billWrap.className = val==="fund" ? "hidden" : "";
   if(fundWrap) fundWrap.className = val==="fund" ? "" : "hidden";
-  var cashElT = document.getElementById("expCashFund");
-  var isCashNowT = !!(cashElT && cashElT.getAttribute("data-on")==="1");
   var lbl = document.getElementById("expAmountLbl");
-  if(lbl) lbl.textContent = val==="fund" ? (isCashNowT ? "Starting balance" : "Monthly budget") : "Amount";
+  if(lbl) lbl.textContent = val==="fund" ? "Monthly budget" : "Amount";
   var adjustWrapT = document.getElementById("expAdjustWrap");
   if(adjustWrapT) adjustWrapT.className = (editId && val==="fund") ? "" : "hidden";
   var help = document.getElementById("expTypeHelp");
@@ -5021,8 +5088,6 @@ function expCashFundToggle(){
   var nowOn = !on;
   t.setAttribute("data-on", nowOn?"1":"0");
   t.className = "toggle"+(nowOn?" on":"");
-  var lbl = document.getElementById("expAmountLbl");
-  if(lbl) lbl.textContent = nowOn ? "Starting balance" : "Monthly budget";
   var adjustWrap = document.getElementById("expAdjustWrap");
   if(adjustWrap) adjustWrap.className = editId ? "" : "hidden";
 }
@@ -6180,7 +6245,7 @@ function openForgotPin(){
     + '<button class="btn btn-ghost" style="width:100%;margin-top:.5rem" onclick="closeForgotPin()">Cancel</button>');
 }
 function closeForgotPin(){
-  document.getElementById("modalRoot").innerHTML = "";
+  closeModal();
 }
 function confirmForgotReset(){
   if(window.confirm("This erases all Billfold data on this device and cannot be undone. Continue?")){
