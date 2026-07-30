@@ -822,6 +822,20 @@ function ensureStateDefaultsAndMigrations(){
     });
     S._migratedSkipToPerOccurrence = true;
   }
+  /* Cash funds used to track a one-time startingBalance instead of a monthly budget, before
+     that was unified with how every other fund works. Any cash fund created before that
+     change still has startingBalance set and no budget at all — silently contributing $0 to
+     every total that reads f.budget (the Funds tab, this screen's income comparison, the
+     Budget report), even though it clearly has money set aside. Runs once. */
+  if(!S._migratedCashFundBudget){
+    S.expenses.forEach(function(e){
+      if(e.type==="fund" && e.cashFund && e.budget===undefined && e.startingBalance!==undefined){
+        e.budget = num(e.startingBalance);
+        delete e.startingBalance;
+      }
+    });
+    S._migratedCashFundBudget = true;
+  }
   S.savingsEntries = S.savingsEntries.map(function(e){
     var amt = num(e.amount);
     var type = e.type || (amt < 0 ? "withdrawal" : "deposit");
@@ -869,6 +883,7 @@ var billsSearchOpen = false, billsSearchQuery = "";
 var monthSearchOpen = false, monthSearchQuery = "";
 var monthSort = "due_default"; // due_default | cat_group | name_asc | amount_desc
 var moneyMathOpen = false;
+var billsMathOpen = false;
 var monthHidePaid = false;
 var billsSort = "cat_group"; // cat_group | due_asc | name_asc | amount_desc
 var billsFilterCategory = null;
@@ -1247,7 +1262,7 @@ function restOfYear(){
     });
     fundsList().forEach(function(f){
       if(!f.active) return;
-      sum += Math.max(0, fundBudgetFor(f, view.y, m) - fundSpentInMonth(f, view.y, m));
+      sum += fundLeftInMonth(f, view.y, m);
     });
     visibleDebtCreditItems().forEach(function(d){
       if(d.payoffMethod!=="fixed") return; // a "pay in full" balance can't be forecast this far out
@@ -1451,7 +1466,7 @@ function monthScreen(){
   var cardsTotal = num(data.oneTime);
   var activeFunds = fundsList().filter(function(f){ return f.active && !f.cashFund; });
   var fundsLeft = activeFunds.reduce(function(s,f){
-    return s + Math.max(0, fundBudgetFor(f, view.y, view.m) - fundSpentInMonth(f, view.y, view.m));
+    return s + fundLeftInMonth(f, view.y, view.m);
   }, 0);
   var afterAll = num(data.balance) - cardsTotal - stillDue - fundsLeft;
   var pct = totalDue>0 ? Math.round((totalDue-stillDue)/totalDue*100) : 100;
@@ -1724,6 +1739,27 @@ function billRow(b){
     + '<span class="tnum" style="font-weight:700;font-size:.9rem">'+usd(baseAmount(b))+'</span>'
     + '</button></li>';
 }
+// Same grouping used everywhere else category totals show up, just split by Bill vs Fund
+// instead of blended together — so a category with both (like a rent bill and a home-repair
+// fund) shows as two separate, checkable lines instead of one combined number.
+function billsMathBreakdown(){
+  var billCats = {};
+  billsList().filter(function(b){return b.active;}).forEach(function(b){
+    var v = billThisMonthCost(b);
+    if(v<=0) return; // not due this month, or every occurrence skipped — nothing to show
+    billCats[b.category] = (billCats[b.category]||0) + v;
+  });
+  var fundCats = {};
+  fundsList().filter(function(f){return f.active;}).forEach(function(f){
+    var v = num(f.budget);
+    if(v<=0) return;
+    fundCats[f.category] = (fundCats[f.category]||0) + v;
+  });
+  var rows = [];
+  Object.keys(billCats).sort().forEach(function(c){ rows.push({type:"Bill", cat:c, v:billCats[c]}); });
+  Object.keys(fundCats).sort().forEach(function(c){ rows.push({type:"Fund", cat:c, v:fundCats[c]}); });
+  return rows;
+}
 function billsSection(){
   var active = billsList().filter(function(b){return b.active;});
   var activeFunds = fundsList().filter(function(f){return f.active;});
@@ -1739,7 +1775,16 @@ function billsSection(){
   } else {
     h += '<div class="row"><span class="muted" style="font-size:.8rem">Bills &amp; funds use '+Math.min(999,pct)+'% of monthly income</span>'
       + '<span class="tnum" style="font-size:.8rem;font-weight:600">'+usd(typical)+' of '+usd(income)+'</span></div>'
-      + '<div class="track" style="margin-top:.45rem"><div class="fill" style="width:'+Math.min(100,pct)+'%;background:'+(pct>100?"var(--red)":"var(--pine)")+'"></div></div>';
+      + '<div class="track" style="margin-top:.45rem"><div class="fill" style="width:'+Math.min(100,pct)+'%;background:'+(pct>100?"var(--red)":"var(--pine)")+'"></div></div>'
+      + '<button style="all:unset;cursor:pointer;display:flex;align-items:center;gap:.3rem;margin-top:.6rem;color:var(--sub);font-size:.75rem;font-weight:600" onclick="billsMathOpen=!billsMathOpen;render()">'
+      + (billsMathOpen ? "Hide the math" : "Show the math") + ' <span style="display:flex;transform:rotate('+(billsMathOpen?"-90":"90")+'deg)">'+icon("right",13)+'</span></button>'
+      + (billsMathOpen ? (function(){
+          var rows = billsMathBreakdown();
+          if(!rows.length) return '<p class="muted" style="font-size:.75rem;margin-top:.5rem">Nothing active is contributing to this total for '+MS[view.m-1]+'.</p>';
+          return '<div style="margin-top:.5rem">' + rows.map(function(r){
+            return '<div class="row" style="margin-top:.35rem;font-size:.75rem"><span class="muted">'+r.type+' · '+esc(r.cat)+'</span><span class="tnum" style="font-weight:600">'+usd(r.v)+'</span></div>';
+          }).join("") + '</div>';
+        })() : '');
   }
   h += '</section>';
 
@@ -1905,7 +1950,7 @@ function fundsSection(){
   var active = fundsList().filter(function(f){ return f.active; });
   var budgetTotal = active.reduce(function(s,f){ return s+num(f.budget); },0);
   var spentTotal = active.reduce(function(s,f){ return s+fundSpentInMonth(f, view.y, view.m); },0);
-  var leftTotal = active.reduce(function(s,f){ return s+Math.max(0, num(f.budget)-fundSpentInMonth(f, view.y, view.m)); },0);
+  var leftTotal = active.reduce(function(s,f){ return s+fundLeftInMonth(f, view.y, view.m); },0);
 
   var h = '<section class="card pad"><h2 class="eyebrow">Funds — '+MS[view.m-1]+' '+view.y+'</h2>'
     + '<p class="muted" style="font-size:.85rem;margin-bottom:.75rem">Budgeted amounts for spending that varies month to month — groceries, gas, and the like. A cash fund works exactly the same way, for spending you pay for with cash instead of your tracked balance or a card — it just never touches Available now. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-funds\')">More info</button></p>';
@@ -1956,7 +2001,7 @@ function fundsSection(){
   visible.forEach(function(f, i){
     var spent = fundSpentInMonth(f, view.y, view.m);
     var budget = num(f.budget);
-    var left = Math.max(0, budget - spent);
+    var left = fundLeftInMonth(f, view.y, view.m);
     var pct = budget>0 ? Math.max(0, Math.min(100, spent/budget*100)) : 0;
     var over = spent > budget;
     var rowInner = '<div class="row" style="margin-bottom:.1rem">'
@@ -3962,7 +4007,8 @@ var UPDATE_LOG = [
       "Linking an expense to a savings goal is now its own field, independent of Category — previously picking a goal secretly replaced the category with a synthetic \"→ Goal Name\" string. Category is fully yours to manage now; picking a goal still locks the expense's type to Bill, since a Fund can't feed one.",
       "Debts and credit cards now show up as bills in their own \"Credit & debt\" section at the top of the Month tab, with a payoff method: \"Balance in full\" (the bill defaults to the live balance; checking it off zeroes it out) or \"Set amount\" (a fixed monthly payment, same as a regular bill — required for loans, optional for credit). A \"Balance in full\" card that's already marked paid reopens automatically if a new charge comes in. Credit is now the default type (and first in the list) when adding a new one, since it's added more often than loans.",
       "\"Don't adjust a balance\" is now an option everywhere money gets paid from — bills, debts — not just spending entries, for anything already accounted for elsewhere (an autopay from an untracked account, a payroll deduction, cash payment). Marking something paid this way still updates its own paid status normally; it just skips touching Available now or any card balance.",
-      "Funds can now be flagged \"Cash fund\" for money already set aside separately — physical cash, a separate account. A cash fund tracks a running balance instead of a monthly budget: it doesn't reset each month and doesn't reduce Available now, since that money was never part of it to begin with. Its balance can be corrected anytime via a dedicated \"Adjust balance\" action, which logs the correction as its own entry instead of silently overwriting the number.",
+      "Funds can now be flagged \"Cash fund\" for money already set aside separately — physical cash, a separate account. A cash fund tracks a running balance instead of a monthly budget: it doesn't reset each month and doesn't reduce Available now, since that money was never part of it to begin with.",
+      "Any fund's edit screen now has an \"Adjust remaining\" link to correct that month's left amount directly — say, a missed receipt or a purchase that shouldn't count the usual way. It's logged as its own correction, tied to whichever month you're viewing, and never shows up as spending or in reports.",
       "\"My money\" on the Month tab now shows just Available now and Net remaining up front, with the supporting numbers (still due, funds left, rest of year) tucked behind a \"Show the math\" toggle — Available now stays directly editable either way.",
       "Bills and Log each get a floating add button instead of a button pinned to the top of the list, so it's reachable without scrolling back up — Settings' combined Income/goals/debts screen keeps its inline buttons instead, since that page has two separate lists to add to.",
       "The Android back button now returns to the Month tab from any other tab before it'll exit the app, instead of exiting from wherever you happen to be.",
@@ -4357,7 +4403,7 @@ var HELP_ITEMS = [
       + "</ol>"
       + '<p class="help-p">Billfold subtracts spending from the budget automatically, so you can see what\u2019s left. A toggle also offers to subtract it from that month\u2019s Available now — worth leaving on, so Available now reflects money you\u2019ve actually spent.</p>'
       + '<p class="help-p">A fund can\u2019t go below $0. If an entry would push it past its budget, check <b>Unplanned</b> to log it anyway — it still counts in reports under that fund\u2019s category, it just won\u2019t drag the fund\u2019s remaining negative.</p>'
-      + '<p class="help-p"><b>Cash fund</b> — flip this on when adding a fund for money you\u2019ve already set aside separately, like physical cash or a separate account. Instead of a monthly budget, it tracks a running balance: it doesn\u2019t reset each month, and it doesn\u2019t reduce Available now, since that money was never part of it. Spending against it logs the same way as any fund. To correct the balance itself (say, after counting your wallet), use the fund\u2019s own <b>Adjust balance</b> action — it logs the difference as an adjustment rather than quietly overwriting the number.</p>' },
+      + '<p class="help-p"><b>Cash fund</b> — flip this on when adding a fund for money you\u2019ve already set aside separately, like physical cash or a separate account. Instead of a monthly budget, it tracks a running balance: it doesn\u2019t reset each month, and it doesn\u2019t reduce Available now, since that money was never part of it. Spending against it logs the same way as any fund.</p>' },
   { id:"help-spending-needs-fund", title:"Why every spending entry needs a fund",
     body:"<p>Every spending entry ties to a Fund. A couple of things are intentional here:</p>"
       + '<ul class="help-list">'
@@ -4803,7 +4849,7 @@ function openExpenseForm(id, defaultType, presetGoalId){
   var remindOn = e ? !e.remindOff : false;
   var isCashFund = e ? !!e.cashFund : false;
   var amountVal = e ? num(type==="fund" ? e.budget : e.estimate) : "";
-  var amountLbl = type==="fund" ? "Monthly budget" : "Amount";
+  var amountLbl = type==="fund" ? (isCashFund ? "Starting balance" : "Monthly budget") : "Amount";
 
   var typeBlock = '<div class="fgroup" id="expTypeBlockWrap">' + expTypeBlockHtml(type, isGoalLinked, !!e) + '</div>';
 
@@ -4819,6 +4865,8 @@ function openExpenseForm(id, defaultType, presetGoalId){
     + '<div class="fgroup"><label id="expAmountLbl" class="flabel">'+amountLbl+'</label>'
     + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
     + '<input id="expAmount" class="tnum" inputmode="decimal" value="'+amountVal+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div>'
+    + '<div id="expAdjustWrap" class="'+((e && type==="fund")?"":"hidden")+'" style="margin-top:.35rem">'
+    + '<button style="all:unset;cursor:pointer;font-size:.78rem;font-weight:600;color:var(--pine)" onclick="openFundAdjustBalance(\''+(e?esc(e.id):"")+'\')">Adjust remaining</button></div>'
     + '</div>'
     + '</div>'
 
@@ -4879,8 +4927,12 @@ function expTypeChange(val){
   var fundWrap = document.getElementById("expFundWrap");
   if(billWrap) billWrap.className = val==="fund" ? "hidden" : "";
   if(fundWrap) fundWrap.className = val==="fund" ? "" : "hidden";
+  var cashElT = document.getElementById("expCashFund");
+  var isCashNowT = !!(cashElT && cashElT.getAttribute("data-on")==="1");
   var lbl = document.getElementById("expAmountLbl");
-  if(lbl) lbl.textContent = val==="fund" ? "Monthly budget" : "Amount";
+  if(lbl) lbl.textContent = val==="fund" ? (isCashNowT ? "Starting balance" : "Monthly budget") : "Amount";
+  var adjustWrapT = document.getElementById("expAdjustWrap");
+  if(adjustWrapT) adjustWrapT.className = (editId && val==="fund") ? "" : "hidden";
   var help = document.getElementById("expTypeHelp");
   if(help) help.innerHTML = expTypeHelpText(val) + ' <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-setup-expenses\')">More info</button>';
   var activeWrap = document.getElementById("expActiveBlockWrap");
@@ -4966,8 +5018,82 @@ function expRemindToggle(btn){
 function expCashFundToggle(){
   var t = document.getElementById("expCashFund");
   var on = t.getAttribute("data-on")==="1";
-  t.setAttribute("data-on", on?"0":"1");
-  t.className = "toggle"+(on?"":" on");
+  var nowOn = !on;
+  t.setAttribute("data-on", nowOn?"1":"0");
+  t.className = "toggle"+(nowOn?" on":"");
+  var lbl = document.getElementById("expAmountLbl");
+  if(lbl) lbl.textContent = nowOn ? "Starting balance" : "Monthly budget";
+  var adjustWrap = document.getElementById("expAdjustWrap");
+  if(adjustWrap) adjustWrap.className = editId ? "" : "hidden";
+}
+// Corrects a fund's "left" for whichever month is currently being viewed — e.g. a missed
+// receipt, or spending that should count differently. Stored as a journal entry flagged
+// adjustment:true, dated to the viewed month; fundSpentInMonth and the spending log already
+// skip adjustment entries, so this never touches "spent" or shows up in reports. Only one
+// correction is kept per fund per month — saving again replaces it rather than stacking.
+function fundAdjustmentEntryFor(fund, y, m){
+  var found = null;
+  S.journal.forEach(function(e){
+    if(e.fundId!==fund.id || !e.adjustment) return;
+    var d = new Date(e.date+"T00:00:00");
+    if(isNaN(d)) return;
+    if(d.getFullYear()===y && (d.getMonth()+1)===m) found = e;
+  });
+  return found;
+}
+function fundAdjustmentAmountFor(fund, y, m){
+  var e = fundAdjustmentEntryFor(fund, y, m);
+  return e ? num(e.amount) : 0;
+}
+function fundLeftInMonth(fund, y, m){
+  return Math.max(0, fundBudgetFor(fund,y,m) - fundSpentInMonth(fund,y,m) + fundAdjustmentAmountFor(fund,y,m));
+}
+function openFundAdjustBalance(fundId){
+  var fund = S.expenses.filter(function(x){ return x.id===fundId; })[0];
+  if(!fund) return;
+  var y = view.y, m = view.m;
+  var current = fundLeftInMonth(fund, y, m);
+  var existing = fundAdjustmentEntryFor(fund, y, m);
+  modal("Adjust "+esc(fund.name)+"'s remaining",
+    '<p class="muted" style="font-size:.85rem;margin-bottom:.75rem">Currently '+usd(current)+' left for '+MONTHS[m-1]+' '+y+'. Enter what it should actually be — the difference is logged as a correction, not counted as spending.</p>'
+    + '<div class="fgroup"><label class="flabel">New amount left</label>'
+    + '<div class="money" style="width:auto;border-radius:.75rem;padding:0 .75rem"><span>$</span>'
+    + '<input id="fabAmount" class="tnum" inputmode="decimal" value="'+current+'" placeholder="0" style="padding:.6rem 0 .6rem .25rem">'+calcBtn()+'</div></div>'
+    + '<p id="fabErr" class="msg-err" style="display:none"></p>'
+    + '<button class="btn btn-pine" style="width:100%;margin-top:1rem;padding:.8rem" onclick="fabSave(\''+esc(fundId)+'\')">Save</button>'
+    + (existing ? '<button style="all:unset;cursor:pointer;display:block;text-align:center;width:100%;margin-top:.75rem;font-size:.8rem;font-weight:600;color:var(--red)" onclick="fabRemove(\''+esc(fundId)+'\')">Remove correction</button>' : ''));
+}
+function fabSave(fundId){
+  var fund = S.expenses.filter(function(x){ return x.id===fundId; })[0];
+  if(!fund) return;
+  var y = view.y, m = view.m;
+  var input = document.getElementById("fabAmount");
+  var err = document.getElementById("fabErr");
+  var newLeft = num(input.value);
+  if(input.value.trim()===""){ err.textContent="Enter a valid amount."; err.style.display="block"; return; }
+  var rawLeft = fundBudgetFor(fund,y,m) - fundSpentInMonth(fund,y,m);
+  var neededAdjustment = Math.round((newLeft - rawLeft)*100)/100;
+  var existing = fundAdjustmentEntryFor(fund, y, m);
+  if(Math.abs(neededAdjustment) < 0.005){
+    if(existing) S.journal = S.journal.filter(function(x){ return x!==existing; });
+  } else if(existing){
+    existing.amount = neededAdjustment;
+  } else {
+    var dateStr = y+"-"+(m<10?"0"+m:m)+"-01";
+    S.journal.push({ id:"j"+Date.now(), name:"Correction", amount:neededAdjustment, date:dateStr, fundId:fund.id, debtId:null, unplanned:false, category:fund.category, balanceAdjust:null, chargeMethod:"none", adjustment:true });
+  }
+  persist();
+  closeModal();
+  render();
+}
+function fabRemove(fundId){
+  var fund = S.expenses.filter(function(x){ return x.id===fundId; })[0];
+  if(!fund) return;
+  var existing = fundAdjustmentEntryFor(fund, view.y, view.m);
+  if(existing) S.journal = S.journal.filter(function(x){ return x!==existing; });
+  persist();
+  closeModal();
+  render();
 }
 function expSave(){
   var type = document.getElementById("expType").value;
