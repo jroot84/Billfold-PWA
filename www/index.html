@@ -620,6 +620,7 @@ function ensureStateDefaultsAndMigrations(){
   if(S.remindersOn === undefined) S.remindersOn = false;
   if(!S.remindDays) S.remindDays = 3;
   if(S.devOptionsRevealed === undefined) S.devOptionsRevealed = false;
+  if(S.hideCorrections === undefined) S.hideCorrections = false;
   /* Migrate existing installs: the investing calculator used to be a transient, unsaved
      global. Bring it into S so it persists going forward. */
   if(!S.calc) S.calc = { start:1000, contrib:100, freq:"monthly", rate:7, years:20 };
@@ -2210,15 +2211,22 @@ function spendingReportBody(){
   var period = histMonthsAndLabel();
   var jRows = journalRowsForScope(period.months);
   var jTotal = jRows.reduce(function(s,r){ return s+r.v; },0);
+  var corr = correctionsForScope(period.months);
   var h = '<button class="field row" style="cursor:pointer;margin-bottom:.75rem" onclick="openHistPeriodSheet()">'
     + '<span style="font-size:.85rem;font-weight:600">'+esc(period.label)+'</span>'
     + '<span style="color:var(--sub);display:flex;align-items:center;gap:.25rem;font-size:.8rem">Change '+icon("right",14)+'</span>'
-    + '</button>'
-    + '<section class="card pad">'
+    + '</button>';
+  if(corr.count>0){
+    h += '<button class="field row" style="cursor:pointer;margin-bottom:.75rem" onclick="toggleHideCorrections()">'
+      + '<span style="font-size:.8rem;color:var(--sub)">'+(S.hideCorrections?"Corrections hidden":"Showing corrections")+'</span>'
+      + '<span class="toggle'+(S.hideCorrections?"":" on")+'"><span class="knob"></span></span></button>';
+  }
+  h += '<section class="card pad">'
     + '<div class="donut-wrap"><div class="donut" style="background:'+donutBgFor(jRows,jTotal)+'"></div>'
     + '<div class="donut-hole"><span class="amt tnum">'+usd(jTotal)+'</span>'
     + '<span class="cap">logged</span></div></div>'
     + categoryListHtml(jRows,jTotal)
+    + ((corr.count>0 && !S.hideCorrections) ? correctionRowHtml(corr) : '')
     + '</section>';
   return h;
 }
@@ -2444,12 +2452,17 @@ function fundBudgetByCategory(months){
   });
   return byCat;
 }
+// Balance corrections (S.journal entries flagged adjustment:true) are logged against a fund's
+// category, but they aren't real spending — folding them into that category's total would make
+// the number lie (a missed-receipt correction could even show up as negative "spending"). Keep
+// them out of the normal per-category rows entirely; the report surfaces them separately instead.
 function journalRowsForScope(months){
   var inRange = {};
   months.forEach(function(pair){ inRange[pair[0]+"-"+pair[1]] = true; });
   var byCat = {};
   function add(c,v){ byCat[c]=(byCat[c]||0)+v; }
   S.journal.forEach(function(e){
+    if(e.adjustment) return;
     var d = new Date(e.date+"T00:00:00");
     if(isNaN(d)) return;
     var ey=d.getFullYear(), em=d.getMonth()+1;
@@ -2461,6 +2474,41 @@ function journalRowsForScope(months){
   return Object.keys(byCat).map(function(c){
     return { cat:c, v:byCat[c], budget: (c in budgets) ? budgets[c] : null };
   }).sort(function(a,b){ return b.v-a.v; });
+}
+// Totals up balance-correction entries (adjustment:true) for the given period, kept separate
+// from journalRowsForScope so the Spending report can show them as their own line — or hide
+// them entirely — instead of quietly blending into whichever fund's category they were logged
+// against.
+function correctionsForScope(months){
+  var inRange = {};
+  months.forEach(function(pair){ inRange[pair[0]+"-"+pair[1]] = true; });
+  var total = 0, count = 0;
+  S.journal.forEach(function(e){
+    if(!e.adjustment) return;
+    var d = new Date(e.date+"T00:00:00");
+    if(isNaN(d)) return;
+    var ey=d.getFullYear(), em=d.getMonth()+1;
+    if(!inRange[ey+"-"+em]) return;
+    total += num(e.amount); count++;
+  });
+  return { total:total, count:count };
+}
+function toggleHideCorrections(){
+  S.hideCorrections = !S.hideCorrections;
+  persist(); render();
+}
+function correctionRowHtml(corr){
+  var neg = corr.total < 0;
+  return '<div class="divider"></div>'
+    + '<div class="report-li" style="opacity:.8">'
+    + '<div class="row"><span style="display:flex;align-items:center;gap:.5rem;font-weight:600;font-size:.875rem">'
+    + '<span class="cat-dot" style="width:9px;height:9px;background:var(--sub)"></span>Correction'
+    + '</span>'
+    + '<span class="tnum" style="font-size:.875rem"><b style="color:'+(neg?"var(--red)":"var(--pine)")+'">'
+    + (neg ? "\u2212"+usd(-corr.total) : usd(corr.total)) + '</b></span></div>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.3rem">'
+    + corr.count+' balance correction'+(corr.count===1?"":"s")+' this period \u2014 not counted toward the total above.</p>'
+    + '</div>';
 }
 function donutBgFor(rows,total){
   var stops=[], acc=0;
@@ -6082,6 +6130,35 @@ function devRefreshPending(){
     }).join("") + '</ul>';
   }).catch(function(){ el.textContent = "Couldn't read the schedule."; });
 }
+// Every balance-correction entry across all funds and all time, newest first — lets Jonathan
+// review or clean up corrections without hunting through the Spending report period by period.
+function devAllCorrections(){
+  return S.journal.filter(function(e){ return e.adjustment; })
+    .slice().sort(function(a,b){ return a.date<b.date?1:(a.date>b.date?-1:0); });
+}
+function devCorrectionsListHtml(){
+  var list = devAllCorrections();
+  if(!list.length) return '<p class="muted" style="font-size:.8rem">No corrections logged.</p>';
+  return '<ul class="plain">' + list.map(function(e){
+    var fund = S.expenses.filter(function(x){ return x.id===e.fundId; })[0];
+    var d = new Date(e.date+"T00:00:00");
+    var when = isNaN(d) ? e.date : (MS[d.getMonth()]+" "+d.getFullYear());
+    var neg = num(e.amount) < 0;
+    return '<li style="padding:.5rem 0;border-top:1px solid var(--line)"><div class="row">'
+      + '<div><div style="font-weight:600;font-size:.85rem">'+esc(fund?fund.name:"Deleted fund")+'</div>'
+      + '<div class="muted" style="font-size:.72rem">'+esc(when)+'</div></div>'
+      + '<div style="display:flex;align-items:center;gap:.6rem">'
+      + '<span class="tnum" style="font-weight:700;font-size:.85rem;color:'+(neg?"var(--red)":"var(--pine)")+'">'
+      + (neg ? "\u2212"+usd(-num(e.amount)) : usd(e.amount)) + '</span>'
+      + '<button style="all:unset;cursor:pointer;color:var(--red);display:flex" aria-label="Delete correction" onclick="devDeleteCorrection(\''+e.id+'\')">'+icon("x",16)+'</button>'
+      + '</div></div></li>';
+  }).join("") + '</ul>';
+}
+function devDeleteCorrection(id){
+  S.journal = S.journal.filter(function(x){ return x.id!==id; });
+  persist();
+  render();
+}
 function devDetailCard(){
   return '<button class="btn btn-pine" style="width:100%;margin-bottom:.5rem" onclick="devSendTestNotification()">Send a test notification now</button>'
     + '<button class="btn btn-pine" style="width:100%;margin-bottom:.5rem" onclick="devSendTestBillReminder()">Send a test bill reminder (with actions)</button>'
@@ -6099,6 +6176,10 @@ function devDetailCard(){
     + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.5rem">Scheduled reminders</h3>'
     + '<button class="btn btn-ghost" style="width:100%;margin-bottom:.5rem" onclick="devRefreshPending()">Refresh list</button>'
     + '<div id="devPendingList" class="muted" style="font-size:.8rem">Tap “Refresh list” to load what’s currently scheduled.</div>'
+    + '<div class="divider"></div>'
+    + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.5rem">Corrections</h3>'
+    + '<p class="muted" style="font-size:.72rem;margin-bottom:.5rem">Balance corrections logged from a fund\'s “Adjust remaining” screen, across every month. These never count as spending or show up in the Bills/Debts reports — the Spending report can show or hide them as a single line, but delete them here if you want them gone for good.</p>'
+    + devCorrectionsListHtml()
     + '<div class="divider"></div>'
     + '<h3 style="font-size:.85rem;font-weight:700;margin-bottom:.5rem">Technical specs</h3>'
     + '<div class="code" style="white-space:pre-wrap;font-size:.75rem;padding:.75rem;height:auto;min-height:0">'+esc(devTechSpecs())+'</div>'
