@@ -507,7 +507,9 @@ function seedState(){
     backupRemindersOn:true,
     backupReminderDays:14,
     hiddenTabs:[],
-    debts:[]
+    debts:[],
+    autoAdjustAvailable:true,
+    autoAdjustCredit:true
   };
 }
 /* ---------- sample data (dev-only "Load sample data") ----------
@@ -566,7 +568,9 @@ function sampleState(){
     hiddenTabs:[],
     calc:{ start:1000, contrib:100, freq:"monthly", rate:7, years:20 },
     backupRemindersOn:true,
-    backupReminderDays:14
+    backupReminderDays:14,
+    autoAdjustAvailable:true,
+    autoAdjustCredit:true
   };
 }
 var sampleDataArmed = false;
@@ -632,6 +636,8 @@ function ensureStateDefaultsAndMigrations(){
   if(S.paycheckAmount===undefined) S.paycheckAmount = 0;
   if(!S.payFrequency) S.payFrequency = "biweekly";
   if(S.lastPaycheckDate===undefined) S.lastPaycheckDate = "";
+  if(S.autoAdjustAvailable===undefined) S.autoAdjustAvailable = true;
+  if(S.autoAdjustCredit===undefined) S.autoAdjustCredit = true;
   if(!S._migratedDebtBillsRemoved){
     var oldDebtBillIds = S.expenses.filter(function(e){ return !!e.linkedDebtId; }).map(function(e){ return e.id; });
     if(oldDebtBillIds.length){
@@ -1023,9 +1029,37 @@ function paymentOptions(excludeId){
   return [{ id:"none", name:"Don't adjust a balance" }, { id:"available", name:"Available Balance" }]
     .concat(creditPaymentOptions(excludeId).map(function(d){ return { id:d.id, name:d.name }; }));
 }
+/* ---------- Auto-adjust toggles (Settings → Setup) ----------
+   Two global switches, independent of any bill/debt's own "Pay with" choice: whether marking
+   something paid is actually allowed to move Available now, and separately, whether it's
+   allowed to move a credit balance. Off doesn't change what's stored on any bill or entry —
+   it just makes the movement a no-op at the one place money actually moves (subtractBalanceAt,
+   chargeDebt, unchargeDebt below), so flipping the toggle back on picks up exactly where things
+   left off. "none" (Don't adjust a balance) is never blocked, since it was already inert. */
+function payMethodBlocked(id){
+  if(id==="available") return S.autoAdjustAvailable===false;
+  if(id && id!=="none") return S.autoAdjustCredit===false; // any debt id is a credit balance
+  return false;
+}
+// Builds a "Pay with" <select>: any option whose global auto-adjust toggle is off is shown
+// disabled (can't be newly picked). If the CURRENTLY selected value is itself blocked, the
+// whole select is locked — the value stays exactly as saved, nothing to accidentally change,
+// and it comes back to life the moment the matching toggle in Settings → Setup is switched on.
+function paymentMethodSelectHtml(selectId, opts, currentMethod, onchangeAttr){
+  var lockedWhole = payMethodBlocked(currentMethod);
+  var optionsHtml = opts.map(function(o){
+    var blocked = payMethodBlocked(o.id);
+    return '<option value="'+esc(o.id)+'"'+(o.id===currentMethod?" selected":"")+(blocked?" disabled":"")+'>'
+      + esc(o.name) + (blocked?" — auto-adjust off":"") + '</option>';
+  }).join("");
+  return '<select id="'+esc(selectId)+'" class="field"'+(onchangeAttr?' onchange="'+onchangeAttr+'"':'')+(lockedWhole?" disabled":"")+'>'
+    + optionsHtml + '</select>'
+    + (lockedWhole ? '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Locked — auto-adjust for this is off in Settings → Setup, so it won\u2019t move any balance right now. Turn it back on there to change this.</p>' : '');
+}
 // Adding a charge to a credit-flagged debt (a bill, spending entry, or another debt's payment
 // routed to it) — just adds to the balance, no interest math. Reversible via unchargeDebt.
 function chargeDebt(debtId, amount, y, m){
+  if(S.autoAdjustCredit===false) return;
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt || amount<=0) return;
   debt.balance = num(num(debt.balance) + amount);
@@ -1039,6 +1073,7 @@ function chargeDebt(debtId, amount, y, m){
   }
 }
 function unchargeDebt(debtId, amount){
+  if(S.autoAdjustCredit===false) return;
   var debt = S.debts.filter(function(d){ return d.id===debtId; })[0];
   if(!debt || amount<=0) return;
   debt.balance = Math.max(0, num(num(debt.balance) - amount));
@@ -1057,6 +1092,7 @@ function reversePaymentEffect(y, m, method, amount){
   if(method==="none") return;
   if(method && method!=="available") unchargeDebt(method, amount);
   else{
+    if(S.autoAdjustAvailable===false) return;
     var k = mk(y,m);
     if(!S.months[k]) S.months[k] = emptyMonth();
     S.months[k].balance = num(num(S.months[k].balance) + amount);
@@ -1177,9 +1213,8 @@ function openDebtPay(debtId){
   var currentMethod = debt.defaultPayMethod || "available";
   var methodBlock = opts.length>1
     ? '<div class="fgroup" style="margin-top:.9rem"><label class="flabel">Pay with</label>'
-      + '<select id="debtPayMethodSel" class="field">'
-      + opts.map(function(o){ return '<option value="'+esc(o.id)+'"'+(o.id===currentMethod?" selected":"")+'>'+esc(o.name)+'</option>'; }).join("")
-      + '</select></div>'
+      + paymentMethodSelectHtml("debtPayMethodSel", opts, currentMethod)
+      + '</div>'
     : '';
   modal(esc(debt.name),
     '<p class="muted" style="font-size:.875rem;margin-bottom:1rem">'+usd(num(debt.balance)+(isPaid?paidAmt:0))+' total balance owed</p>'
@@ -2904,6 +2939,7 @@ function billLeftAt(y,m,billId,occ){
 var balanceWarning = null;
 function subtractBalanceAt(y, m, amount){
   if(!amount) return;
+  if(S.autoAdjustAvailable===false) return;
   var k = mk(y,m);
   if(!S.months[k]) S.months[k] = emptyMonth();
   var cur = num(S.months[k].balance);
@@ -2984,6 +3020,7 @@ function applyBalanceAdjust(entry){
 }
 function revertBalanceAdjust(entry){
   if(!entry.balanceAdjust) return;
+  if(S.autoAdjustAvailable===false) return;
   var k = mk(entry.balanceAdjust.y, entry.balanceAdjust.m);
   if(!S.months[k]) S.months[k] = emptyMonth();
   S.months[k].balance = num(num(S.months[k].balance) + num(entry.balanceAdjust.amount));
@@ -3203,14 +3240,19 @@ function jfMethodBlockHtml(fund, startMethod, date){
       + '<div class="field" style="display:flex;align-items:center;color:var(--sub)">Cash</div>'
       + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Cash spending doesn\u2019t touch Available now or any card — it\u2019s just tracked here.</p>';
   }
-  var methodOpts = jfMethodOptions().map(function(o){
-    return '<option value="'+esc(o.id)+'"'+(o.id===startMethod?" selected":"")+'>'+esc(o.name)+'</option>';
+  var opts = jfMethodOptions();
+  var lockedWhole = payMethodBlocked(startMethod);
+  var methodOpts = opts.map(function(o){
+    var blocked = payMethodBlocked(o.id);
+    return '<option value="'+esc(o.id)+'"'+(o.id===startMethod?" selected":"")+(blocked?" disabled":"")+'>'
+      + esc(o.name) + (blocked?" — auto-adjust off":"") + '</option>';
   }).join("");
   return '<label class="flabel">Pay with</label>'
-    + '<select id="jfMethodSel" class="field" onchange="jfMethodChanged()">'+methodOpts+'</select>'
+    + '<select id="jfMethodSel" class="field" onchange="jfMethodChanged()"'+(lockedWhole?" disabled":"")+'>'+methodOpts+'</select>'
     + '<p id="jfMethodNote" class="muted" style="font-size:.72rem;margin-top:.35rem">'+jfMethodCaption(startMethod, date)+'</p>';
 }
 function jfMethodCaption(method, dateStr){
+  if(payMethodBlocked(method)) return "Locked — auto-adjust for this is off in Settings → Setup, so it won\u2019t move any balance right now. Turn it back on there to change this.";
   if(method==="none") return "Won't touch any balance — good if this is already accounted for elsewhere.";
   if(method==="available") return "Reduces "+jfBalanceMonthLabel(dateStr)+"'s Available now automatically.";
   var debt = S.debts.filter(function(d){ return d.id===method; })[0];
@@ -4066,6 +4108,11 @@ function settingsDetailScreen(key){
   else if(key==="reset") body = resetDetailCard();
   else if(key==="dev") body = devDetailCard();
   else { settingsSubScreen = null; return settingsListScreen(); }
+  // goals/tabs/backup already build their own multiple <section class="card"> blocks (for
+  // visual separation between distinct groups of settings); everything else still gets the
+  // single generic wrap, since those are one self-contained topic each.
+  var selfWrapped = { goals:1, tabs:1, backup:1 };
+  if(selfWrapped[key]) return settingsBackHeader(titles[key]) + body;
   return settingsBackHeader(titles[key]) + '<section class="card pad">' + body + '</section>';
 }
 /* ---------- What's new / update log ----------
@@ -4077,6 +4124,9 @@ var UPDATE_LOG = [
     version: "1.2",
     date: "July 2026",
     notes: [
+      "Added two global toggles in Settings → Setup (and to the setup wizard): \"Auto-adjustments\" for Available Balance and for credit balances, on by default. Turning one off doesn't change any bill's or debt's own \"Pay with\" choice — it just stops that specific movement from happening automatically, locking the relevant \"Pay with\" picker at its current value (grayed out with an explanation) until the toggle's switched back on, at which point it picks up right where it left off.",
+      "Settings → Setup is now four separate cards (Income & plan, Auto-adjustments, Savings goals, Debt & credit) instead of one long combined card — same for Tabs & appearance and Back up & restore — so related options aren't visually cramped together.",
+      "The web/PWA preview now works offline once it's been opened at least once with a connection, via a new service worker that caches the app shell and serves it when there's no signal.",
       "Fixed and Variable are now just one type, \"Bill\" — Variable could already do everything Fixed could (instant-check, editable amount, Skip) plus handle a bill coming in over or under expectations, which Fixed never could. Existing Fixed bills convert over automatically; partial payment (Fixed's old \"amount left\" tracking) has no equivalent in the merged model — a bill is due or paid at whatever amount was confirmed, never partway paid in between.",
       "Linking an expense to a savings goal is now its own field, independent of Category — previously picking a goal secretly replaced the category with a synthetic \"→ Goal Name\" string. Category is fully yours to manage now; picking a goal still locks the expense's type to Bill, since a Fund can't feed one.",
       "Debts and credit cards now show up as bills in their own \"Credit & debt\" section at the top of the Month tab, with a payoff method: \"Balance in full\" (the bill defaults to the live balance; checking it off zeroes it out) or \"Set amount\" (a fixed monthly payment, same as a regular bill — required for loans, optional for credit). A \"Balance in full\" card that's already marked paid reopens automatically if a new charge comes in. Credit is now the default type (and first in the list) when adding a new one, since it's added more often than loans.",
@@ -4150,7 +4200,7 @@ function updatesDetailCard(){
 }
 function tabsDetailCard(){
   var HIDEABLE = [["bills","Bills"],["track","Log"],["reports","Tools"]];
-  var h = '<h2 class="eyebrow">Tabs</h2>'
+  var tabsSection = '<section class="card pad"><h2 class="eyebrow">Tabs</h2>'
     + '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">Hide tabs you don\'t need daily — Month and Settings always stay visible, and hiding just clears the tab bar without locking you out. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-hide-tabs\')">More info</button></p>'
     + '<ul class="plain">'
     + HIDEABLE.map(function(t){
@@ -4163,9 +4213,9 @@ function tabsDetailCard(){
         + '<button style="all:unset;cursor:pointer" aria-label="Show '+t[1]+' in tab bar" onclick="toggleTabHidden(\''+t[0]+'\')"><span class="toggle'+(hidden?"":" on")+'"><span class="knob"></span></span></button>'
         + '</li>';
     }).join("")
-    + '</ul>';
-  h += '<div class="divider"></div><h2 class="eyebrow">Appearance</h2>' + appearanceCard();
-  return h;
+    + '</ul></section>';
+  var appearanceSection = '<section class="card pad"><h2 class="eyebrow">Appearance</h2>' + appearanceCard() + '</section>';
+  return tabsSection + appearanceSection;
 }
 // Three real states, not one generic message: already running installed (nothing to do),
 // a browser that can trigger the native install dialog directly (Chrome/Edge/most Android
@@ -4203,13 +4253,15 @@ function triggerInstallPrompt(){
 }
 function backupDetailCard(){
   var on = S.backupRemindersOn!==false;
-  return '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">Save a backup file to keep a safety copy or move your data to another phone.</p>'
+  var actionsSection = '<section class="card pad">'
+    + '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">Save a backup file to keep a safety copy or move your data to another phone.</p>'
     + '<div class="grid2">'
     + '<button class="btn btn-ink" onclick="openExport()">'+icon("down",16)+' Back up</button>'
     + '<button class="btn btn-ghost" onclick="openImport()">'+icon("up",16)+' Restore</button>'
     + '</div>'
     + '<p class="muted" style="font-size:.75rem;margin-top:.7rem"><b>Back up</b> saves a file you name and place (Files, Drive, email…). <b>Restore</b> loads one back in — this replaces what\'s on the device, so restore before making new edits there. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-backup\')">More info</button></p>'
-    + '<div class="divider"></div>'
+    + '</section>';
+  var remindersSection = '<section class="card pad">'
     + '<button class="field row" style="cursor:pointer" onclick="S.backupRemindersOn='+(on?"false":"true")+';persist();render()">'
     + '<span style="font-size:.875rem;font-weight:500">Backup reminders</span>'
     + '<span class="toggle'+(on?" on":"")+'"><span class="knob"></span></span></button>'
@@ -4217,7 +4269,9 @@ function backupDetailCard(){
       + '<input class="field" type="number" min="1" max="90" value="'+num(S.backupReminderDays)+'" style="max-width:100px" '
       + 'onchange="S.backupReminderDays=Math.max(1,parseInt(this.value,10)||14);persist();">'
       + '<p class="muted" style="font-size:.72rem;margin-top:.6rem">Also nudges early if you\'ve logged a lot of new bills, spending, or savings entries since your last backup — whichever comes first.</p>'
-      : '');
+      : '')
+    + '</section>';
+  return actionsSection + remindersSection;
 }
 // Flat amount vs. regular paycheck — mirrors monthlyIncomeFor's own two modes so the Setup
 // page and every report stay in sync automatically.
@@ -4274,40 +4328,73 @@ function goalsSettingsCard(){
   }
   var leftover = monthlyIncomeFor(view.y, view.m)-typical;
 
-  var h = '<h2 class="eyebrow">Income &amp; plan</h2>'
+  var incomeSection = '<section class="card pad"><h2 class="eyebrow">Income &amp; plan</h2>'
     + incomeSectionHtml()
     + '<div style="margin-top:.75rem;font-size:.875rem">'
     + '<div class="row"><span class="muted">Typical month (bills &amp; funds)</span><span class="tnum" style="font-weight:600">'+usd(typical)+'</span></div>'
     + '<div class="row"><span class="muted">Busiest month</span><span class="tnum" style="font-weight:600">'+usd(busiest)+'</span></div>'
     + '<div class="row"><span class="muted">Left over (this month)</span>'
     + '<span class="tnum" style="font-weight:700;color:'+(leftover>=0?"var(--pine)":"var(--red)")+'">'+usd(leftover)+'</span></div>'
-    + '</div>'
-    + '<div class="divider"></div>'
-    + '<h2 class="eyebrow">Savings goals</h2>';
+    + '</div></section>';
 
+  var autoAdjustSection = '<section class="card pad">' + autoAdjustSectionHtml() + '</section>';
+
+  var savingsSection = '<section class="card pad"><h2 class="eyebrow">Savings goals</h2>';
   if(!S.savingsGoals.length){
-    return h + '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">No goals yet. Give one a name and a target, then log deposits from Log → Savings. You can add up to 5.</p>'
+    savingsSection += '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">No goals yet. Give one a name and a target, then log deposits from Log → Savings. You can add up to 5.</p>'
       + '<button class="btn btn-pine" style="width:100%" onclick="openGoalForm(null)">+ Add goal</button>';
-  }
-  h += '<ul class="plain">' + S.savingsGoals.map(function(g){
-    var saved = savingsTotalFor(g.id);
-    var target = num(g.target);
-    var pct = target>0 ? Math.max(0, Math.min(100, saved/target*100)) : 0;
-    var reached = target>0 && saved>=target;
-    return '<li><button class="bill-li" style="width:100%;text-align:left" onclick="openGoalForm(\''+g.id+'\')">'
-      + '<div style="flex:1"><div class="bill-name">'+esc(g.name)+(reached?' 🎉':'')+'</div>'
-      + '<div class="bill-cat">'+usd(saved)+' of '+usd(target)+(reached?' · Goal reached!':' · '+Math.round(pct)+'%')+'</div></div>'
-      + '<span style="color:var(--sub)">'+icon("right",18)+'</span>'
-      + '</button></li>';
-  }).join("") + '</ul>';
-  if(S.savingsGoals.length<5){
-    h += '<button class="btn btn-pine" style="width:100%;margin-top:.75rem" onclick="openGoalForm(null)">+ Add goal</button>';
   } else {
-    h += '<p class="muted" style="font-size:.75rem;margin-top:.75rem">You’ve reached the 5-goal limit. Delete or rename an existing goal to make room for a new one.</p>';
+    savingsSection += '<ul class="plain">' + S.savingsGoals.map(function(g){
+      var saved = savingsTotalFor(g.id);
+      var target = num(g.target);
+      var pct = target>0 ? Math.max(0, Math.min(100, saved/target*100)) : 0;
+      var reached = target>0 && saved>=target;
+      return '<li><button class="bill-li" style="width:100%;text-align:left" onclick="openGoalForm(\''+g.id+'\')">'
+        + '<div style="flex:1"><div class="bill-name">'+esc(g.name)+(reached?' 🎉':'')+'</div>'
+        + '<div class="bill-cat">'+usd(saved)+' of '+usd(target)+(reached?' · Goal reached!':' · '+Math.round(pct)+'%')+'</div></div>'
+        + '<span style="color:var(--sub)">'+icon("right",18)+'</span>'
+        + '</button></li>';
+    }).join("") + '</ul>';
+    if(S.savingsGoals.length<5){
+      savingsSection += '<button class="btn btn-pine" style="width:100%;margin-top:.75rem" onclick="openGoalForm(null)">+ Add goal</button>';
+    } else {
+      savingsSection += '<p class="muted" style="font-size:.75rem;margin-top:.75rem">You’ve reached the 5-goal limit. Delete or rename an existing goal to make room for a new one.</p>';
+    }
   }
-  h += '<div class="divider"></div><h2 class="eyebrow">Debt &amp; credit</h2>';
-  h += debtsListMarkup();
-  return h;
+  savingsSection += '</section>';
+
+  var debtSection = '<section class="card pad"><h2 class="eyebrow">Debt &amp; credit</h2>' + debtsListMarkup() + '</section>';
+
+  return incomeSection + autoAdjustSection + savingsSection + debtSection;
+}
+// The two global auto-adjust toggles, shared by the Setup screen and the setup wizard's
+// dedicated step. Turning one off doesn't touch any bill/debt's own "Pay with" choice — it
+// just goes inert while off (see payMethodBlocked) and picks back up right where it left off.
+// afterFn: an optional global function name to call after toggling, on top of the normal
+// render() — needed inside a modal (like the setup wizard), which render() doesn't touch.
+function autoAdjustSectionHtml(afterFn){
+  var avOn = S.autoAdjustAvailable!==false;
+  var crOn = S.autoAdjustCredit!==false;
+  var after = afterFn ? (",'"+afterFn+"'") : "";
+  return '<h2 class="eyebrow">Auto-adjustments</h2>'
+    + '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem">When something\u2019s marked paid, Billfold normally moves money automatically \u2014 reducing Available now, or adding to a card\u2019s balance. Turn either off if you\u2019d rather update that balance yourself.</p>'
+    + '<button class="field row" style="cursor:pointer" onclick="toggleAutoAdjust(\'autoAdjustAvailable\''+after+')">'
+    + '<span style="font-size:.875rem;font-weight:500">Available Balance</span>'
+    + '<span class="toggle'+(avOn?" on":"")+'"><span class="knob"></span></span></button>'
+    + '<p class="muted" style="font-size:.72rem;margin:.35rem 0 .9rem">'+(avOn
+        ? "On \u2014 paying something set to \u201cAvailable Balance\u201d reduces it automatically."
+        : "Off \u2014 anything set to \u201cAvailable Balance\u201d is locked at that choice and won\u2019t touch it, until you turn this back on.")+'</p>'
+    + '<button class="field row" style="cursor:pointer" onclick="toggleAutoAdjust(\'autoAdjustCredit\''+after+')">'
+    + '<span style="font-size:.875rem;font-weight:500">Credit balances</span>'
+    + '<span class="toggle'+(crOn?" on":"")+'"><span class="knob"></span></span></button>'
+    + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">'+(crOn
+        ? "On \u2014 charging something to a card automatically adds to its balance."
+        : "Off \u2014 anything set to charge a card is locked at that choice and won\u2019t touch its balance, until you turn this back on.")+'</p>';
+}
+function toggleAutoAdjust(key, afterFn){
+  S[key] = (S[key]===false) ? true : false;
+  persist(); render();
+  if(afterFn && typeof window[afterFn]==="function") window[afterFn]();
 }
 function debtsListMarkup(){
   var h = '<p class="muted" style="font-size:.875rem;margin-bottom:.9rem"><b>Credit</b> is revolving — a card or line of credit usable elsewhere in the app alongside Available Balance, with a choice of paying it in full each month or a set amount. <b>Loans</b> are fixed-purpose — you\'re just tracking the payoff, nothing gets charged to these, and it\'s always a set monthly payment. Just a running balance you correct by hand against your statement — no interest math. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-debt-credit\')">More info</button></p>';
@@ -4791,9 +4878,8 @@ function openPay(id, occ){
   var currentMethod = (data.payMethod && data.payMethod[methodKey]) || b.defaultPayMethod || "available";
   var methodBlock = opts.length>1
     ? '<div class="fgroup" style="margin-top:.9rem"><label class="flabel">Pay with</label>'
-      + '<select id="payMethodSel" class="field">'
-      + opts.map(function(o){ return '<option value="'+esc(o.id)+'"'+(o.id===currentMethod?" selected":"")+'>'+esc(o.name)+'</option>'; }).join("")
-      + '</select></div>'
+      + paymentMethodSelectHtml("payMethodSel", opts, currentMethod)
+      + '</div>'
     : '';
 
   var goal = b.linkedGoalId ? S.savingsGoals.filter(function(g){ return g.id===b.linkedGoalId; })[0] : null;
@@ -4895,9 +4981,8 @@ function expActiveBlockHtml(type, isActive, defaultPayVal, isDebtLinked, isGoalL
       + '<span id="expActiveLbl" style="font-size:.875rem;font-weight:500">Active'+badge+'</span>'
       + '<span id="expActive" class="toggle'+(isActive?" on":"")+'" data-on="'+(isActive?1:0)+'"><span class="knob"></span></span></button></div>'
       + '<div class="fgroup"><label class="flabel">Pay with</label>'
-      + '<select id="expDefaultPayMethod" class="field">'
-      + paymentOptions().map(function(o){ return '<option value="'+esc(o.id)+'"'+(o.id===defaultPayVal?" selected":"")+'>'+esc(o.name)+'</option>'; }).join("")
-      + '</select></div>'
+      + paymentMethodSelectHtml("expDefaultPayMethod", paymentOptions(), defaultPayVal)
+      + '</div>'
       + '</div>'
       + '<p class="muted" style="font-size:.72rem;margin-top:.35rem">Paused expenses don\'t count anywhere. Sets the default "Pay with" for this bill each month. <button style="all:unset;cursor:pointer;font-weight:600;color:var(--pine)" onclick="openHelpItem(\'help-track-paid\')">More info</button></p>';
   }
@@ -6025,7 +6110,13 @@ function onboardStep2(){
 function onboardSaveStep2(){
   touchMonth().balance = num(document.getElementById("obBalance").value);
   persist();
-  onboardStep3();
+  onboardStep2b();
+}
+function onboardStep2b(){
+  modal("Auto-adjustments",
+    '<p class="muted" style="font-size:.85rem;margin-bottom:1rem">By default, marking something paid moves money automatically \u2014 it reduces Available now, or adds to a card\u2019s balance. Some people want that; others prefer to update those balances by hand. Both are on to start \u2014 flip either off now, or anytime later in Settings \u2192 Setup.</p>'
+    + autoAdjustSectionHtml("onboardStep2b")
+    + '<button class="btn btn-pine" style="width:100%;margin-top:1.25rem;padding:.8rem" onclick="onboardStep3()">Continue</button>');
 }
 function onboardStep3(){
   modal("Set a savings goal",
@@ -6350,6 +6441,17 @@ if(window.matchMedia){
   });
 }
 document.addEventListener("keydown", calcKeydown);
+// Offline support for the web/PWA preview only — the installed Android app already has full
+// offline access via the local filesystem and doesn't need this. Registered after "load" so it
+// never competes with the app's own first paint, and wrapped defensively since some contexts
+// (older browsers, certain in-app browsers) don't support service workers at all.
+if(isWebOnly() && "serviceWorker" in navigator){
+  window.addEventListener("load", function(){
+    navigator.serviceWorker.register("./service-worker.js").catch(function(){
+      /* Offline support just won't be available here — the app still works normally online. */
+    });
+  });
+}
 window.addEventListener("beforeinstallprompt", function(e){
   e.preventDefault();
   deferredInstallPrompt = e;
